@@ -1586,6 +1586,18 @@ function rAdminPanel(){
         <button class="btn bsm br" onclick="adminReject(${i})">❌ Reject</button>
       </div>
     </div>`).join('');
+const approvedHTML=approved.length===0
+    ?`<div style="font-size:.78rem;color:var(--text3)">No custom facts added yet</div>`
+    :approved.map((q,i)=>`<div class="dc" style="border-left:3px solid var(--teal)">
+      <div class="dc-date">${q.year||'?'}</div>
+      <div class="dc-event">${q.event||'Unnamed fact'}</div>
+      <div style="font-size:.7rem;color:var(--text2);margin-bottom:5px">${(q.significance||'').slice(0,100)}${q.significance&&q.significance.length>100?'…':''}</div>
+      <div class="dc-m"><span class="tag tp">${q.topic||''}</span><span class="tag tb">${q.period||''}</span></div>
+      <div style="display:flex;gap:7px;margin-top:8px">
+        <button class="btn bsm" style="background:rgba(255,80,80,.12);border-color:var(--coral);color:var(--coral)" onclick="adminDeleteApproved(${i})">🗑 Delete</button>
+      </div>
+    </div>`).join('');
+
   return`<div>
   ${backBtn()}
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-wrap:wrap;gap:8px">
@@ -1597,6 +1609,8 @@ function rAdminPanel(){
   </div>
   <div class="sec" style="margin-top:0">📬 Pending Approval</div>
   ${pendingHTML}
+  <div class="sec">✅ Approved / Added Facts</div>
+  ${approvedHTML}
   </div>`;
 }
 async function adminApprove(idx){
@@ -1616,7 +1630,17 @@ async function adminReject(idx){
   }catch(e){toast('⚠ Worker error: '+e.message,3500);return;}
   _adminPending.splice(idx,1);toast('❌ Fact rejected');render();
 }
-
+async function adminDeleteApproved(idx){
+  const q=S.custom[idx];if(!q)return;
+  if(!confirm(`Delete "${q.event||q.year}"? This cannot be undone.`))return;
+  // Remove from Worker public KV if it has an id
+  if(q.id){
+    try{
+      await fetch(WORKER_URL+'/dv/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:_adminToken,id:q.id})});
+    }catch(e){/* non-fatal — still remove locally */}
+  }
+  S.custom.splice(idx,1);save();toast('🗑 Fact deleted');render();
+}
 async function loadCloudFacts(){
   try{
     const resp=await fetch(WORKER_URL+'/dv/quotes');
