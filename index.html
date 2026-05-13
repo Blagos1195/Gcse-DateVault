@@ -196,7 +196,7 @@ select option{background:var(--bg3)}
 <div id="toast"></div>
 
 <script>
-const WORKER_URL = "https://quotevault-api.noah-l-barker.workers.dev/dv";
+const WORKER_URL = "https://quotevault-api.noah-l-barker.workers.dev";
 
 // ════════════════════════════════════════════════
 // DATE / EVENT DATABASE
@@ -1320,7 +1320,7 @@ async function saveFact(){
   const fbEl=document.getElementById('add-fb');
   fbEl.innerHTML=`<div class="qfb" style="background:rgba(74,158,255,.08);border:1px solid rgba(74,158,255,.25);color:var(--blue)">⏳ Submitting…</div>`;
   try{
-    const resp=await fetch(WORKER_URL+'/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(q)});
+    const resp=await fetch(WORKER_URL+'/dv/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(q)});
     if(!resp.ok)throw new Error('HTTP '+resp.status);
     toast('📬 Fact submitted for review');
     fbEl.innerHTML=`<div class="qfb" style="background:rgba(124,92,191,.1);border:1px solid rgba(124,92,191,.3);color:var(--purple3)">📬 Submitted for admin review!</div>`;
@@ -1511,7 +1511,7 @@ function adminLogout(){_adminAuth=false;_adminToken=null;_adminPending=[];render
 async function adminLoadPending(){
   render();
   try{
-    const resp=await fetch(WORKER_URL+'/pending?token='+encodeURIComponent(_adminToken));
+    const resp=await fetch(WORKER_URL+'/dv/pending?token='+encodeURIComponent(_adminToken));
     if(!resp.ok)throw new Error('HTTP '+resp.status);
     const data=await resp.json();
     _adminPending=data.items||[];
@@ -1548,7 +1548,7 @@ function rAdminPanel(){
 async function adminApprove(idx){
   const q={..._adminPending[idx]};if(!q)return;
   try{
-    const resp=await fetch(WORKER_URL+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:_adminToken,id:q.id})});
+    const resp=await fetch(WORKER_URL+'/dv/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:_adminToken,id:q.id})});
     if(!resp.ok)throw new Error('HTTP '+resp.status);
   }catch(e){toast('⚠ Worker error: '+e.message,3500);return;}
   delete q.submittedAt;S.custom.push(q);addXP(5);save();
@@ -1557,7 +1557,7 @@ async function adminApprove(idx){
 async function adminReject(idx){
   const q=_adminPending[idx];if(!q)return;
   try{
-    const resp=await fetch(WORKER_URL+'/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:_adminToken,id:q.id})});
+    const resp=await fetch(WORKER_URL+'/dv/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:_adminToken,id:q.id})});
     if(!resp.ok)throw new Error('HTTP '+resp.status);
   }catch(e){toast('⚠ Worker error: '+e.message,3500);return;}
   _adminPending.splice(idx,1);toast('❌ Fact rejected');render();
@@ -1565,7 +1565,7 @@ async function adminReject(idx){
 
 async function loadCloudFacts(){
   try{
-    const resp=await fetch(WORKER_URL+'/quotes');
+    const resp=await fetch(WORKER_URL+'/dv/quotes');
     if(!resp.ok)return;
     const data=await resp.json();
     if(Array.isArray(data.items)){
