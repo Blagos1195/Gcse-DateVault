@@ -42,12 +42,12 @@ body{font-family:'DM Sans',sans-serif;background:#0b0a14;color:#dddaf0;height:10
 #main{flex:1;display:flex;flex-direction:column;height:100vh;overflow:hidden;min-width:0}
 #topbar{height:44px;min-height:44px;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;padding:0 14px;flex-shrink:0}
 .tb-title{font-family:'Playfair Display',serif;font-size:1rem;color:var(--gold);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#page{flex:1;overflow-y:auto;overflow-x:hidden;padding:14px;scroll-behavior:smooth}
+#page{flex:1;overflow-y:auto;overflow-x:hidden;padding:14px;padding-bottom:60px;scroll-behavior:smooth;-webkit-overflow-scrolling:touch}
 #page::-webkit-scrollbar{width:4px}
 #page::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
 #hbg{display:none;background:none;border:none;color:var(--text);font-size:1.1rem;cursor:pointer;padding:4px}
 #overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:150}
-@media(max-width:620px){#hbg{display:block}#sidebar{position:fixed;left:0;top:0;transform:translateX(-100%)}#sidebar.open{transform:translateX(0)}}
+@media(max-width:620px){#hbg{display:block}#sidebar{position:fixed;left:0;top:0;transform:translateX(-100%)}#sidebar.open{transform:translateX(0)}body{overflow:hidden}#page{padding-bottom:80px}}
 .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 14px}
 .g2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .g3{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
@@ -138,18 +138,15 @@ select option{background:var(--bg3)}
 .hm-cell{width:12px;height:12px;border-radius:2px;background:var(--bg4);transition:background .2s;cursor:default;flex-shrink:0}
 
 /* ── TIMELINE ── */
-#tl-outer{overflow-x:auto;overflow-y:hidden;padding:0 14px 14px;-webkit-overflow-scrolling:touch}
-.tl-track{position:relative;min-height:220px;padding:100px 0 40px;cursor:grab;user-select:none}
-.tl-track:active{cursor:grabbing}
-.tl-axis{position:absolute;top:50%;left:0;right:0;height:3px;background:linear-gradient(90deg,transparent,var(--border2) 5%,var(--border2) 95%,transparent);transform:translateY(-50%);pointer-events:none}
-.tl-tick{position:absolute;top:50%;width:1px;background:var(--border2);transform:translateX(-50%);pointer-events:none}
-.tl-tick-lbl{position:absolute;top:50%;font-family:'DM Mono',monospace;font-size:.6rem;color:var(--text3);transform:translate(-50%,8px);white-space:nowrap;pointer-events:none}
-.tl-event{position:absolute;top:50%;transform:translate(-50%,-50%);z-index:10}
-.tl-dot{width:12px;height:12px;border-radius:50%;background:var(--purple);border:2px solid var(--purple3);cursor:pointer;transition:transform .15s}
-.tl-dot:hover,.tl-dot.sel{transform:scale(1.5)}
-.tl-event-lbl{position:absolute;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:.6rem;color:var(--text2);pointer-events:none;background:var(--bg2);padding:1px 4px;border-radius:3px;max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tl-event-lbl.above{bottom:calc(100% + 8px)}
-.tl-event-lbl.below{top:calc(100% + 8px)}
+#tl-outer{position:relative;overflow:hidden;border:1px solid var(--border);border-radius:10px;background:var(--bg3);margin-bottom:10px;touch-action:none;user-select:none}
+#tl-canvas-wrap{overflow:hidden;width:100%;cursor:grab}
+#tl-canvas-wrap:active{cursor:grabbing}
+#tl-canvas-wrap canvas{display:block}
+.tl-zoom-bar{display:flex;gap:6px;align-items:center;padding:6px 10px;background:var(--bg2);border-bottom:1px solid var(--border)}
+.tl-zoom-btn{background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:5px;padding:2px 9px;font-size:.75rem;cursor:pointer;font-family:'DM Sans',sans-serif}
+.tl-zoom-btn:hover{background:var(--bg4)}
+.tl-zoom-label{font-size:.65rem;color:var(--text3);flex:1}
+.tl-detail-box{margin-top:0;padding:10px 14px;background:var(--card);border-top:1px solid var(--border);min-height:44px;font-size:.78rem}
 /* drag-and-drop timeline */
 .tl-drop-zone{min-height:340px;position:relative;background:var(--bg3);border:2px dashed var(--border2);border-radius:10px;margin:10px 0;overflow:hidden}
 .tl-drop-axis{position:absolute;top:50%;left:20px;right:20px;height:3px;background:var(--border2)}
@@ -1006,86 +1003,385 @@ function rTCEnd(){
 }
 
 // ════════════════════════════════════════════════
-// TIMELINE — DRAG AND DROP
+// TIMELINE — ZOOMABLE + SCROLLABLE (Canvas-based)
 // ════════════════════════════════════════════════
+let _tlState={
+  zoom:1,          // pixels per year
+  offset:0,        // pan offset in pixels from left
+  minY:0, maxY:0,  // data range
+  pool:[],
+  canvas:null, ctx:null,
+  isDragging:false, dragStartX:0, dragStartOffset:0,
+  isPinching:false, pinchStartDist:0, pinchStartZoom:1,
+  selectedId:null,
+  WIDTH:0, HEIGHT:200,
+  baseZoom:1,      // zoom level that fits all data in view
+};
+
 function rTimeline(){
   const topicList=topics().filter(t=>t!=='All');
   const selTopic=S.tl.topic||topicList[0];
   const periodList=periods(selTopic);
-
-  // Sub-mode: browse | drag
   if(S.tl.mode==='drag')return rTimelineDrag();
 
-  // Browse mode: visual read-only scrollable timeline
   let pool=allQ().filter(q=>q.topic===selTopic);
   if(S.tl.period&&S.tl.period!=='All')pool=pool.filter(q=>q.period===S.tl.period);
   pool=pool.slice().sort((a,b)=>a.yearNum-b.yearNum);
 
-  // Build timeline
-  const minY=pool[0]?.yearNum||0;
-  const maxY=pool[pool.length-1]?.yearNum||1;
-  const range=Math.max(maxY-minY,1);
-  const TW=Math.max(900,pool.length*80); // px width
-
-  const dotHTML=pool.map((q,i)=>{
-    const x=Math.round(40+((q.yearNum-minY)/range)*(TW-80));
-    const above=i%2===0;
-    const col=S.mastered.has(q.id)?'var(--teal)':S.learning.has(q.id)?'var(--gold)':'var(--purple)';
-    return`<div class="tl-event" style="left:${x}px">
-      <div class="tl-dot" style="background:${col};border-color:${col}" title="${q.year}: ${q.event}" onclick="showDateDetail('${q.id}')"></div>
-      <div class="tl-event-lbl ${above?'above':'below'}">${q.year}</div>
-    </div>`;
-  }).join('');
-
-  // Ticks every ~100 years or sensible interval
-  const tickInterval=range>500?100:range>100?25:range>50?10:5;
-  const firstTick=Math.ceil(minY/tickInterval)*tickInterval;
-  let tickHTML='';
-  for(let y=firstTick;y<=maxY;y+=tickInterval){
-    const x=Math.round(40+((y-minY)/range)*(TW-80));
-    tickHTML+=`<div class="tl-tick" style="left:${x}px;height:16px;top:calc(50% - 8px)"></div>
-    <div class="tl-tick-lbl" style="left:${x}px">${y}</div>`;
-  }
+  // Date selector panel: show all dates for topic as clickable buttons
+  const allTopicDates=allQ().filter(q=>q.topic===selTopic).sort((a,b)=>a.yearNum-b.yearNum);
 
   return`<div>
   ${backBtn()}
   <div class="pt">Timeline</div>
-  <div class="ps">Browse and interact with historical events on a timeline</div>
+  <div class="ps">Pinch/scroll to zoom · drag to pan · tap dots for details</div>
   <div class="fbar">
-    ${topicList.map(t=>`<button class="fbtn${selTopic===t?' active':''}" onclick="S.tl.topic='${t}';S.tl.period='All';render()">${t}</button>`).join('')}
+    ${topicList.map(t=>`<button class="fbtn${selTopic===t?' active':''}" onclick="S.tl.topic='${t}';S.tl.period='All';S.tl.tlZoom=null;S.tl.tlOffset=null;render()">${t}</button>`).join('')}
   </div>
   <div class="fbar">
     ${periodList.map(p=>`<button class="fbtn${(S.tl.period||'All')===p?' active':''}" onclick="S.tl.period='${p}';render()">${p}</button>`).join('')}
   </div>
-  <div style="display:flex;gap:8px;margin-bottom:10px">
+  <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
     <button class="btn bp" onclick="S.tl.mode='drag';S.tl.checked=false;S.tl.placed={};render()">🎯 Drag & Drop Challenge</button>
   </div>
-  <div style="font-size:.68rem;color:var(--text3);margin-bottom:6px">Tap any dot for details · ${pool.length} events shown · <span style="color:var(--teal2)">■</span> Mastered <span style="color:var(--gold)">■</span> Learning <span style="color:var(--purple3)">■</span> New</div>
+  <div style="font-size:.68rem;color:var(--text3);margin-bottom:6px"><span style="color:var(--teal2)">●</span> Mastered <span style="color:var(--gold)">●</span> Learning <span style="color:var(--purple3)">●</span> New · ${pool.length} events shown</div>
   <div id="tl-outer">
-    <div class="tl-track" style="width:${TW}px">
-      <div class="tl-axis"></div>
-      ${tickHTML}
-      ${dotHTML}
+    <div class="tl-zoom-bar">
+      <button class="tl-zoom-btn" onclick="tlZoomIn()">＋ Zoom In</button>
+      <button class="tl-zoom-btn" onclick="tlZoomOut()">－ Zoom Out</button>
+      <button class="tl-zoom-btn" onclick="tlZoomReset()">⟳ Fit</button>
+      <span class="tl-zoom-label" id="tl-zoom-label"></span>
+    </div>
+    <div id="tl-canvas-wrap" style="width:100%;overflow:hidden">
+      <canvas id="tl-canvas" style="display:block;width:100%"></canvas>
+    </div>
+    <div class="tl-detail-box" id="tl-detail"><span style="color:var(--text3);font-size:.72rem">Tap any event dot for details</span></div>
+  </div>
+
+  <div class="card" style="margin-top:10px">
+    <div class="sec" style="margin-top:0">📅 All Dates for ${selTopic} — tap to highlight on timeline</div>
+    <div style="display:flex;flex-wrap:wrap;gap:5px;max-height:180px;overflow-y:auto;padding:2px">
+    ${allTopicDates.map(q=>`<button onclick="tlHighlightDate('${q.id}')" style="background:${S.mastered.has(q.id)?'rgba(44,182,125,.2)':S.learning.has(q.id)?'rgba(232,197,71,.15)':'var(--bg4)'};border:1px solid ${S.mastered.has(q.id)?'var(--teal)':S.learning.has(q.id)?'var(--gold)':'var(--border2)'};color:${S.mastered.has(q.id)?'var(--teal2)':S.learning.has(q.id)?'var(--gold)':'var(--text2)'};border-radius:5px;padding:3px 8px;font-size:.65rem;cursor:pointer;font-family:'DM Mono',monospace;white-space:nowrap;transition:all .1s" title="${q.event}">${q.year}</button>`).join('')}
     </div>
   </div>
-  <div id="tl-detail" style="margin-top:10px"></div>
   </div>`;
+}
+
+function tlInitCanvas(){
+  const canvas=document.getElementById('tl-canvas');
+  if(!canvas)return;
+  const wrap=document.getElementById('tl-canvas-wrap');
+  if(!wrap)return;
+  const W=wrap.clientWidth||300;
+  canvas.width=W*window.devicePixelRatio;
+  canvas.height=_tlState.HEIGHT*window.devicePixelRatio;
+  canvas.style.height=_tlState.HEIGHT+'px';
+  _tlState.canvas=canvas;
+  _tlState.ctx=canvas.getContext('2d');
+  _tlState.ctx.scale(window.devicePixelRatio,window.devicePixelRatio);
+  _tlState.WIDTH=W;
+
+  // compute pool & range
+  const selTopic=S.tl.topic||topics().filter(t=>t!=='All')[0];
+  let pool=allQ().filter(q=>q.topic===selTopic);
+  if(S.tl.period&&S.tl.period!=='All')pool=pool.filter(q=>q.period===S.tl.period);
+  pool=pool.slice().sort((a,b)=>a.yearNum-b.yearNum);
+  _tlState.pool=pool;
+  const minY=pool[0]?.yearNum??0;
+  const maxY=pool[pool.length-1]?.yearNum??minY+1;
+  _tlState.minY=minY;_tlState.maxY=maxY;
+  const range=Math.max(maxY-minY,1);
+  // base zoom: fit all in 90% of width
+  const baseZoom=(W*0.88)/range;
+  _tlState.baseZoom=baseZoom;
+
+  // restore or init zoom/offset
+  if(S.tl.tlZoom!=null){_tlState.zoom=S.tl.tlZoom;}else{_tlState.zoom=baseZoom;}
+  if(S.tl.tlOffset!=null){_tlState.offset=S.tl.tlOffset;}else{_tlState.offset=(W*(1-0.88)/2);}
+
+  tlBindEvents();
+  tlDraw();
+}
+
+function tlDraw(){
+  const{ctx,WIDTH,HEIGHT,zoom,offset,minY,maxY,pool,selectedId}=_tlState;
+  if(!ctx)return;
+  ctx.clearRect(0,0,WIDTH,HEIGHT);
+  const range=Math.max(maxY-minY,1);
+  const CY=HEIGHT/2;
+
+  // axis
+  ctx.strokeStyle='rgba(255,255,255,0.13)';
+  ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(0,CY);ctx.lineTo(WIDTH,CY);ctx.stroke();
+
+  // smart tick interval
+  const yearsVisible=WIDTH/zoom;
+  const niceIntervals=[1,2,5,10,25,50,100,200,500];
+  let interval=niceIntervals.find(i=>yearsVisible/i<15)||500;
+  const firstTick=Math.ceil(minY/interval)*interval;
+
+  ctx.font='9px DM Mono, monospace';
+  ctx.fillStyle='rgba(90,88,122,0.9)';
+  ctx.textAlign='center';
+  for(let y=firstTick-interval;y<=maxY+interval;y+=interval){
+    const x=offset+(y-minY)*zoom;
+    if(x<-40||x>WIDTH+40)continue;
+    ctx.strokeStyle='rgba(255,255,255,0.07)';
+    ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(x,CY-10);ctx.lineTo(x,CY+10);ctx.stroke();
+    ctx.fillStyle='rgba(90,88,122,0.9)';
+    ctx.fillText(y,x,CY+22);
+  }
+
+  // events
+  pool.forEach((q,i)=>{
+    const x=offset+(q.yearNum-minY)*zoom;
+    if(x<-20||x>WIDTH+20)return;
+    const isMastered=S.mastered.has(q.id);
+    const isLearning=S.learning.has(q.id);
+    const isSel=selectedId===q.id;
+    const col=isMastered?'#3de09a':isLearning?'#e8c547':'#9b7ee0';
+    const r=isSel?9:6;
+
+    // dot
+    ctx.beginPath();ctx.arc(x,CY,r,0,Math.PI*2);
+    ctx.fillStyle=col+'33';
+    ctx.fill();
+    ctx.strokeStyle=col;
+    ctx.lineWidth=isSel?2.5:1.5;
+    ctx.stroke();
+
+    // label — alternate above/below
+    const above=i%2===0;
+    const labelY=above?CY-16:CY+28;
+    const maxLabelW=Math.max(50,zoom*18);
+    let label=q.year;
+    if(zoom>1.2)label=q.year+' '+q.event;
+    ctx.font=isSel?'bold 10px DM Mono, monospace':'10px DM Mono, monospace';
+    ctx.fillStyle=isSel?col:'rgba(155,152,181,0.9)';
+    ctx.textAlign='center';
+    // truncate
+    let txt=label;
+    while(ctx.measureText(txt).width>maxLabelW&&txt.length>4)txt=txt.slice(0,-2)+'…';
+    ctx.fillText(txt,x,labelY);
+
+    // tick from axis to label
+    ctx.strokeStyle='rgba(255,255,255,0.06)';
+    ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(x,CY+(above?-r:r));ctx.lineTo(x,above?CY-12:CY+20);ctx.stroke();
+  });
+
+  // update zoom label
+  const lbl=document.getElementById('tl-zoom-label');
+  if(lbl){
+    const yPerPx=1/_tlState.zoom;
+    lbl.textContent=`${_tlState.pool.length} events · ${Math.round(yPerPx)} yr/px`;
+  }
+}
+
+function tlXtoYear(x){
+  return _tlState.minY+(x-_tlState.offset)/_tlState.zoom;
+}
+
+function tlClampOffset(){
+  const{WIDTH,zoom,minY,maxY}=_tlState;
+  const range=Math.max(maxY-minY,1);
+  const dataW=range*zoom;
+  const padding=WIDTH*0.15;
+  const maxOffset=padding;
+  const minOffset=WIDTH-dataW-padding;
+  _tlState.offset=Math.min(maxOffset,Math.max(minOffset,_tlState.offset));
+}
+
+function tlBindEvents(){
+  const canvas=_tlState.canvas;
+  if(!canvas||canvas._tlBound)return;
+  canvas._tlBound=true;
+
+  // Mouse
+  canvas.addEventListener('mousedown',e=>{
+    _tlState.isDragging=true;
+    _tlState.dragStartX=e.clientX;
+    _tlState.dragStartOffset=_tlState.offset;
+  });
+  window.addEventListener('mousemove',e=>{
+    if(!_tlState.isDragging)return;
+    _tlState.offset=_tlState.dragStartOffset+(e.clientX-_tlState.dragStartX);
+    tlClampOffset();
+    tlSaveState();
+    tlDraw();
+  });
+  window.addEventListener('mouseup',()=>{_tlState.isDragging=false;});
+
+  // Click to select
+  canvas.addEventListener('click',e=>{
+    if(_tlState._didDrag)return;
+    const rect=canvas.getBoundingClientRect();
+    const scaleX=canvas.width/(rect.width*window.devicePixelRatio);
+    const x=(e.clientX-rect.left);
+    const y=(e.clientY-rect.top);
+    const CY=_tlState.HEIGHT/2;
+    let hit=null;let bestDist=14;
+    _tlState.pool.forEach(q=>{
+      const qx=_tlState.offset+(q.yearNum-_tlState.minY)*_tlState.zoom;
+      const dist=Math.sqrt((x-qx)**2+(y-CY)**2);
+      if(dist<bestDist){bestDist=dist;hit=q;}
+    });
+    if(hit){
+      _tlState.selectedId=hit.id;
+      tlShowDetail(hit);
+      tlDraw();
+    }
+  });
+
+  // Track drag vs click
+  canvas.addEventListener('mousedown',()=>{_tlState._didDrag=false;});
+  window.addEventListener('mousemove',()=>{if(_tlState.isDragging)_tlState._didDrag=true;});
+
+  // Wheel zoom
+  canvas.addEventListener('wheel',e=>{
+    e.preventDefault();
+    const rect=canvas.getBoundingClientRect();
+    const mouseX=e.clientX-rect.left;
+    const yearAtMouse=tlXtoYear(mouseX);
+    const factor=e.deltaY<0?1.15:0.87;
+    _tlState.zoom=Math.max(_tlState.baseZoom*0.5,Math.min(_tlState.baseZoom*50,_tlState.zoom*factor));
+    _tlState.offset=mouseX-(yearAtMouse-_tlState.minY)*_tlState.zoom;
+    tlClampOffset();
+    tlSaveState();
+    tlDraw();
+  },{passive:false});
+
+  // Touch pan & pinch
+  let _lastTouchX=0,_touches=[];
+  canvas.addEventListener('touchstart',e=>{
+    e.preventDefault();
+    _touches=[...e.touches];
+    if(e.touches.length===1){
+      _tlState.isDragging=true;
+      _lastTouchX=e.touches[0].clientX;
+      _tlState.dragStartOffset=_tlState.offset;
+      _tlState._didDrag=false;
+    } else if(e.touches.length===2){
+      _tlState.isPinching=true;
+      _tlState.isDragging=false;
+      const dx=e.touches[0].clientX-e.touches[1].clientX;
+      const dy=e.touches[0].clientY-e.touches[1].clientY;
+      _tlState.pinchStartDist=Math.sqrt(dx*dx+dy*dy);
+      _tlState.pinchStartZoom=_tlState.zoom;
+      _tlState.pinchMidX=(e.touches[0].clientX+e.touches[1].clientX)/2;
+      const rect=canvas.getBoundingClientRect();
+      _tlState.pinchYearAtMid=tlXtoYear(_tlState.pinchMidX-rect.left);
+    }
+  },{passive:false});
+  canvas.addEventListener('touchmove',e=>{
+    e.preventDefault();
+    if(_tlState.isPinching&&e.touches.length===2){
+      const dx=e.touches[0].clientX-e.touches[1].clientX;
+      const dy=e.touches[0].clientY-e.touches[1].clientY;
+      const dist=Math.sqrt(dx*dx+dy*dy);
+      const ratio=dist/_tlState.pinchStartDist;
+      _tlState.zoom=Math.max(_tlState.baseZoom*0.5,Math.min(_tlState.baseZoom*50,_tlState.pinchStartZoom*ratio));
+      const rect=canvas.getBoundingClientRect();
+      const midX=(e.touches[0].clientX+e.touches[1].clientX)/2-rect.left;
+      _tlState.offset=midX-(_tlState.pinchYearAtMid-_tlState.minY)*_tlState.zoom;
+      tlClampOffset();tlSaveState();tlDraw();
+    } else if(_tlState.isDragging&&e.touches.length===1){
+      const dx=e.touches[0].clientX-_lastTouchX;
+      _lastTouchX=e.touches[0].clientX;
+      _tlState.offset+=dx;
+      tlClampOffset();tlSaveState();tlDraw();
+      _tlState._didDrag=true;
+    }
+  },{passive:false});
+  canvas.addEventListener('touchend',e=>{
+    _tlState.isPinching=false;
+    if(e.touches.length===0){
+      _tlState.isDragging=false;
+      if(!_tlState._didDrag){
+        // check tap hit
+        const last=e.changedTouches[0];
+        const rect=canvas.getBoundingClientRect();
+        const x=last.clientX-rect.left;
+        const y=last.clientY-rect.top;
+        const CY=_tlState.HEIGHT/2;
+        let hit=null;let bestDist=20;
+        _tlState.pool.forEach(q=>{
+          const qx=_tlState.offset+(q.yearNum-_tlState.minY)*_tlState.zoom;
+          const dist=Math.sqrt((x-qx)**2+(y-CY)**2);
+          if(dist<bestDist){bestDist=dist;hit=q;}
+        });
+        if(hit){_tlState.selectedId=hit.id;tlShowDetail(hit);tlDraw();}
+      }
+    }
+  },{passive:false});
+}
+
+function tlShowDetail(q){
+  const el=document.getElementById('tl-detail');
+  if(!el)return;
+  el.innerHTML=`<div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+    <div style="font-family:'DM Mono',monospace;color:var(--gold);font-size:.88rem;flex-shrink:0">${q.year}</div>
+    <div style="flex:1;min-width:160px">
+      <div style="font-size:.82rem;color:var(--text);margin-bottom:3px">${q.event}</div>
+      <div style="font-size:.7rem;color:var(--text2);line-height:1.5;margin-bottom:4px">${q.significance.slice(0,180)}${q.significance.length>180?'…':''}</div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap">
+        <span class="tag tp">${q.topic}</span>
+        <span class="tag tb">${q.period||''}</span>
+        ${q.section?`<span class="tag tg">${q.section}</span>`:''}
+        ${q.category?`<span class="tag tt">${q.category}</span>`:''}
+        ${S.mastered.has(q.id)?'<span class="bm">Mastered</span>':S.learning.has(q.id)?'<span class="bl">Learning</span>':'<span class="bn">New</span>'}
+      </div>
+    </div>
+  </div>`;
+}
+
+function tlSaveState(){
+  S.tl.tlZoom=_tlState.zoom;
+  S.tl.tlOffset=_tlState.offset;
+  save();
+}
+
+function tlZoomIn(){
+  const W=_tlState.WIDTH;
+  const yearAtCenter=tlXtoYear(W/2);
+  _tlState.zoom=Math.min(_tlState.baseZoom*50,_tlState.zoom*1.5);
+  _tlState.offset=W/2-(yearAtCenter-_tlState.minY)*_tlState.zoom;
+  tlClampOffset();tlSaveState();tlDraw();
+}
+function tlZoomOut(){
+  const W=_tlState.WIDTH;
+  const yearAtCenter=tlXtoYear(W/2);
+  _tlState.zoom=Math.max(_tlState.baseZoom*0.5,_tlState.zoom/1.5);
+  _tlState.offset=W/2-(yearAtCenter-_tlState.minY)*_tlState.zoom;
+  tlClampOffset();tlSaveState();tlDraw();
+}
+function tlZoomReset(){
+  _tlState.zoom=_tlState.baseZoom;
+  _tlState.offset=_tlState.WIDTH*(1-0.88)/2;
+  tlSaveState();tlDraw();
+}
+
+function tlHighlightDate(id){
+  _tlState.selectedId=id;
+  const q=getQ(id);
+  if(!q)return;
+  // pan so it's centred
+  const x=(q.yearNum-_tlState.minY)*_tlState.zoom;
+  _tlState.offset=_tlState.WIDTH/2-x;
+  tlClampOffset();
+  tlSaveState();
+  tlDraw();
+  if(q)tlShowDetail(q);
 }
 
 function showDateDetail(id){
   const q=getQ(id);if(!q)return;
-  document.getElementById('tl-detail').innerHTML=`
-  <div class="card" style="border-left:3px solid var(--purple)">
-    <div style="font-family:'DM Mono',monospace;color:var(--gold);font-size:.95rem;margin-bottom:4px">${q.year}</div>
-    <div style="font-size:.9rem;margin-bottom:5px">${q.event}</div>
-    <div style="font-size:.73rem;color:var(--text2);line-height:1.6;margin-bottom:6px">${q.significance}</div>
-    <div style="display:flex;gap:5px;flex-wrap:wrap">
-      <span class="tag tp">${q.topic}</span><span class="tag tb">${q.period}</span>
-      ${q.section?`<span class="tag tg">${q.section}</span>`:''}
-      ${q.category?`<span class="tag tt">${q.category}</span>`:''}
-    </div>
-  </div>`;
+  tlHighlightDate(id);
 }
+
+
 
 // ─── DRAG & DROP TIMELINE CHALLENGE ─────────────
 let _dragId=null;
