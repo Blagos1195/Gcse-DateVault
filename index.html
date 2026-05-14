@@ -9,7 +9,7 @@
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html{font-size:13px;height:100%}
-body{font-family:'DM Sans',sans-serif;background:#0b0a14;color:#dddaf0;height:100%;overflow:hidden;-webkit-font-smoothing:antialiased}
+body{font-family:'DM Sans',sans-serif;background:#0b0a14;color:#dddaf0;min-height:100%;overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch;-webkit-font-smoothing:antialiased}
 :root{
   --bg:#0b0a14;--bg2:#12111f;--bg3:#1a192b;--bg4:#22203a;--bg5:#2a2840;
   --card:#161526;--border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.13);--border3:rgba(255,255,255,0.22);
@@ -1604,7 +1604,8 @@ function ddRenderPlacedCards(){
     const isCorrect=checked?Math.abs(yearPlaced-q.yearNum)<=tolerance:null;
     const border=checked?(isCorrect?'var(--teal)':'var(--coral)'):'var(--purple2)';
     const bg=checked?(isCorrect?'rgba(44,182,125,.18)':'rgba(232,93,74,.18)'):'var(--card)';
-    const above=Math.random()<0.5; // stable per card based on id hash
+    const hash = String(id).split('').reduce((a,c)=>a+c.charCodeAt(0),0);
+    const above = (hash % 2) === 0; // stable per card based on id hash
     const topPos=above?(CY-14-54):(CY+14);
     html+=`<div class="tl-card placed" draggable="true"
       id="dcard-${id}"
@@ -1721,7 +1722,16 @@ function ddDragOver(e){
   const lbl=document.getElementById('dd-zoom-label');
   if(lbl&&_dragId)lbl.textContent=`Drop here → ~${year}`;
 }
+let _dragId = null;
 
+function dragStart(id, event) {
+  _dragId = id;
+
+  if (event && event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', id);
+  }
+}
 function ddDropOnTimeline(e){
   e.preventDefault();
   if(!_dragId)return;
@@ -2279,17 +2289,72 @@ function adminEditPending(idx){
   </div>`);
 }
 
-function adminSavePendingEdit(idx){
-  const q={..._adminPending[idx],..._dvReadFields('ep')};
-  // Remove from pending FIRST
-  _adminPending.splice(idx,1);
-  // Approve via worker
-  fetch(WORKER_URL+'/dv/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:_adminToken,id:q.id})}).catch(()=>{});
-  delete q.submittedAt;
-  S.custom.push(q);addXP(5);save();buildNav();closeModal();
-  toast('✅ Edited, approved & added! +5 XP');render();
-}
+async function adminSavePendingEdit(idx){
+  const original = _adminPending[idx];
+  if(!original) return;
 
+  const updated = {
+    ...original,
+    ..._dvReadFields('ep'),
+    id: original.id,
+    submittedAt: original.submittedAt
+  };
+
+  try {
+    // Save edits to pending entry first
+    const updateResp = await fetch(WORKER_URL + '/dv/update-pending', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        token: _adminToken,
+        id: original.id,
+        data: updated
+      })
+    });
+
+    if (!updateResp.ok) {
+      throw new Error('Update failed: HTTP ' + updateResp.status);
+    }
+
+    // Approve updated pending entry
+    const approveResp = await fetch(WORKER_URL + '/dv/approve', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        token: _adminToken,
+        id: original.id
+      })
+    });
+
+    if (!approveResp.ok) {
+      throw new Error('Approve failed: HTTP ' + approveResp.status);
+    }
+
+    // Remove from pending list in UI
+    _adminPending.splice(idx, 1);
+
+    // Update local custom list
+    const existingIndex = S.custom.findIndex(q => q.id === updated.id);
+
+    if (existingIndex >= 0) {
+      S.custom[existingIndex] = updated;
+    } else {
+      S.custom.push(updated);
+    }
+
+    save();
+    closeModal();
+    toast('✅ Edited and approved successfully');
+    render();
+
+  } catch (e) {
+    toast('⚠ ' + e.message, 4000);
+  }
+}
 function adminEditApproved(idx){
   const q=S.custom[idx];
   if(!q)return;
@@ -2302,7 +2367,44 @@ function adminEditApproved(idx){
     </div>
   </div>`);
 }
+async function adminSavePublicEdit(idx){
+  const original = S.custom[idx];
+  if(!original) return;
 
+  const updated = {
+    ...original,
+    ..._dvReadFields('ep'),
+    id: original.id,
+    submittedAt: original.submittedAt
+  };
+
+  try {
+    const resp = await fetch(WORKER_URL + '/dv/update-public', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        token: _adminToken,
+        id: original.id,
+        data: updated
+      })
+    });
+
+    if (!resp.ok) {
+      throw new Error('Update failed: HTTP ' + resp.status);
+    }
+
+    S.custom[idx] = updated;
+    save();
+    closeModal();
+    toast('✅ Entry updated');
+    render();
+
+  } catch (e) {
+    toast('⚠ ' + e.message, 4000);
+  }
+}
 function adminSaveApprovedEdit(idx){
   const updated={...S.custom[idx],..._dvReadFields('ea')};
   S.custom[idx]=updated;
