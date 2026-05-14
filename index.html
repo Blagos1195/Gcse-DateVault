@@ -137,6 +137,7 @@ select option{background:var(--bg3)}
 .hm-grid{display:flex;gap:3px;flex-wrap:wrap;margin-top:8px}
 .hm-cell{width:12px;height:12px;border-radius:2px;background:var(--bg4);transition:background .2s;cursor:default;flex-shrink:0}
 
+  
 /* ── TIMELINE ── */
 #tl-outer{position:relative;overflow:hidden;border:1px solid var(--border);border-radius:10px;background:var(--bg3);margin-bottom:10px;touch-action:none;user-select:none}
 #tl-canvas-wrap{overflow:hidden;width:100%;cursor:grab}
@@ -1092,7 +1093,11 @@ function tlInitCanvas(){
   _tlState.minY=minY;_tlState.maxY=maxY;
   const range=Math.max(maxY-minY,1);
   // base zoom: fit all in 90% of width
-  const baseZoom=(W*0.88)/range;
+  const baseZoom =
+  Math.max(
+    0.12,
+    (W*0.88)/range
+  );
   _tlState.baseZoom=baseZoom;
 
   // restore or init zoom/offset
@@ -1118,7 +1123,7 @@ function tlDraw(){
   // smart tick interval
   const yearsVisible=WIDTH/zoom;
   const niceIntervals=[1,2,5,10,25,50,100,200,500];
-  let interval=niceIntervals.find(i=>yearsVisible/i<15)||500;
+  let interval=niceIntervals.find(i=>yearsVisible/i<12)||500;
   const firstTick=Math.ceil(minY/interval)*interval;
 
   ctx.font='9px DM Mono, monospace';
@@ -1545,7 +1550,7 @@ function ddDraw(){
   // smart ticks
   const yearsVisible=WIDTH/zoom;
   const niceIntervals=[1,2,5,10,25,50,100,200,500];
-  let interval=niceIntervals.find(i=>yearsVisible/i<15)||500;
+  let interval=niceIntervals.find(i=>yearsVisible/i<12)||500;
   const firstTick=Math.ceil(minY/interval)*interval;
   ctx.font='9px DM Mono, monospace';ctx.textAlign='center';
   for(let y=firstTick-interval;y<=maxY+interval;y+=interval){
@@ -1738,6 +1743,13 @@ function ddDropOnTimeline(e){
   if(!wrap)return;
   const rect=wrap.getBoundingClientRect();
   const x=e.clientX-rect.left;
+  const canvas=document.getElementById('dd-canvas');
+
+const canvasRect=canvas.getBoundingClientRect();
+
+// Convert wrap-relative x into canvas-relative x
+const canvasX=x-(canvasRect.left-rect.left);
+
   // Convert pixel to year value
   const yearPlaced=ddXtoYear(x);
   if(!S.tl.placed)S.tl.placed={};
@@ -2261,16 +2273,38 @@ async function adminDeleteApproved(idx){
   S.custom.splice(idx,1);save();toast('🗑 Fact deleted');render();
 }
 async function loadCloudFacts(){
+
   try{
-    const resp=await fetch(WORKER_URL+'/dv/quotes');
-    if(!resp.ok)return;
-    const data=await resp.json();
-    if(Array.isArray(data.items)){
-      // Only add history facts (have yearNum field)
-      const histFacts=data.items.filter(f=>f.yearNum!==undefined);
-      S.custom=[...S.custom,...histFacts];render();
+
+    const resp = await fetch(
+      WORKER_URL + '/dv/quotes',
+      {
+        cache:'no-store'
+      }
+    );
+
+    if(!resp.ok){
+      throw new Error('HTTP '+resp.status);
     }
-  }catch(e){console.log(e);}
+
+    const data = await resp.json();
+
+    if(Array.isArray(data.items)){
+
+      S.custom = data.items
+        .filter(f => f.yearNum !== undefined)
+        .sort((a,b)=>(a.yearNum||0)-(b.yearNum||0));
+
+      save();
+
+      render();
+    }
+
+  }catch(e){
+
+    console.log(e);
+
+  }
 }
 // ════════════════════════════════════════════════
 // ADMIN EDIT HELPERS (DateVault)
@@ -2289,7 +2323,9 @@ function adminEditPending(idx){
 }
 
 async function adminSavePendingEdit(idx){
+
   const original = _adminPending[idx];
+
   if(!original) return;
 
   const updated = {
@@ -2300,58 +2336,56 @@ async function adminSavePendingEdit(idx){
   };
 
   try {
-    // Save edits to pending entry first
-    const updateResp = await fetch(WORKER_URL + '/dv/update-pending', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        token: _adminToken,
-        id: original.id,
-        data: updated
-      })
-    });
 
-    if (!updateResp.ok) {
-      throw new Error('Update failed: HTTP ' + updateResp.status);
+    const updateResp = await fetch(
+      WORKER_URL + '/dv/update-pending',
+      {
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json'
+        },
+        body:JSON.stringify({
+          token:_adminToken,
+          id:original.id,
+          data:updated
+        })
+      }
+    );
+
+    if(!updateResp.ok){
+      throw new Error(await updateResp.text());
     }
 
-    // Approve updated pending entry
-    const approveResp = await fetch(WORKER_URL + '/dv/approve', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        token: _adminToken,
-        id: original.id
-      })
-    });
+    const approveResp = await fetch(
+      WORKER_URL + '/dv/approve',
+      {
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json'
+        },
+        body:JSON.stringify({
+          token:_adminToken,
+          id:original.id
+        })
+      }
+    );
 
-    if (!approveResp.ok) {
-      throw new Error('Approve failed: HTTP ' + approveResp.status);
+    if(!approveResp.ok){
+      throw new Error(await approveResp.text());
     }
 
-    // Remove from pending list in UI
-    _adminPending.splice(idx, 1);
+    await adminLoadPending();
 
-    // Update local custom list
-    const existingIndex = S.custom.findIndex(q => q.id === updated.id);
+    await loadCloudFacts();
 
-    if (existingIndex >= 0) {
-      S.custom[existingIndex] = updated;
-    } else {
-      S.custom.push(updated);
-    }
-
-    save();
     closeModal();
-    toast('✅ Edited and approved successfully');
-    render();
 
-  } catch (e) {
-    toast('⚠ ' + e.message, 4000);
+    toast('✅ Edited and approved');
+
+  } catch(e){
+
+    toast('⚠ '+e.message,4000);
+
   }
 }
 function adminEditApproved(idx){
