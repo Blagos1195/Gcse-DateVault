@@ -2368,7 +2368,7 @@ function adminEditApproved(idx){
 }
 async function adminSavePublicEdit(idx){
   const original = S.custom[idx];
-  if(!original) return;
+  if (!original) return;
 
   const updated = {
     ...original,
@@ -2378,6 +2378,7 @@ async function adminSavePublicEdit(idx){
   };
 
   try {
+    // Save to Cloudflare Worker
     const resp = await fetch(WORKER_URL + '/dv/update-public', {
       method: 'POST',
       headers: {
@@ -2391,17 +2392,26 @@ async function adminSavePublicEdit(idx){
     });
 
     if (!resp.ok) {
-      throw new Error('Update failed: HTTP ' + resp.status);
+      const text = await resp.text();
+      throw new Error('Server update failed (' + resp.status + '): ' + text);
     }
 
+    // Update local cache only after server confirms success
     S.custom[idx] = updated;
     save();
+
+    // Optional: reload all public dates from server to ensure exact sync
+    if (typeof loadDateVault === 'function') {
+      await loadDateVault();
+    }
+
     closeModal();
-    toast('✅ Entry updated');
+    toast('✅ Changes saved to server');
     render();
 
   } catch (e) {
-    toast('⚠ ' + e.message, 4000);
+    console.error('adminSavePublicEdit error:', e);
+    toast('⚠ ' + e.message, 5000);
   }
 }
 function adminSaveApprovedEdit(idx){
