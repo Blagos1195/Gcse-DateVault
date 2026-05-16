@@ -698,8 +698,8 @@ function rLib(){
         ${S.hidden.has(q.id)
           ? `<button class="btn bsm" style="color:var(--amber);border-color:var(--amber);opacity:.7" onclick="toggleHidden('${q.id}')" title="Unhide">👁 Hidden</button>`
           : S.mastered.has(q.id)
-            ? `<button class="btn bsm" style="color:var(--teal2);border-color:var(--teal)" onclick="toggleMastered('${q.id}')">★ Mastered</button>`
-            : `<button class="btn bsm" onclick="toggleMastered('${q.id}')">${S.learning.has(q.id)?'Learning':'Mark'}</button>`}
+            ? `<button class="btn bsm" style="color:var(--teal2);border-color:var(--teal)" onclick="unmasterDV('${q.id}')" title="Mark as not mastered">★ Mastered</button>`
+            : ''}
         <button class="btn bsm" onclick="toggleHidden('${q.id}')" style="color:var(--text3);padding:3px 6px">${S.hidden.has(q.id)?'👁':'🚫'}</button>
       </div>
     </div>
@@ -737,6 +737,12 @@ function toggleMastered(id){
   else if(S.learning.has(id)){S.mastered.add(id);S.learning.delete(id);addXP(10);toast('⭐ Mastered! +10 XP');onMastery();}
   else{S.learning.add(id);}
   save();render();
+}
+function unmasterDV(id){
+  S.mastered.delete(id);
+  save();
+  toast('↩ Marked as not mastered');
+  render();
 }
 
 // ════════════════════════════════════════════════
