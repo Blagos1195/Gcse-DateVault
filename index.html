@@ -361,6 +361,8 @@ const S = {
   srsData:JSON.parse(localStorage.getItem('dv_srs')||'{}'),
   quizHistory:JSON.parse(localStorage.getItem('dv_qh')||'[]'),
   settings:JSON.parse(localStorage.getItem('dv_set')||'{"board":"Edexcel","daily":50}'),
+  achievements:new Set(JSON.parse(localStorage.getItem('dv_ach')||'[]')),
+  masteryPts:JSON.parse(localStorage.getItem('dv_mp')||'{}'),
   fc:{idx:0,topic:'All',flipped:false,mode:'date'},
   libShowHidden:false,
   quiz:{active:false,topic:'All',type:'adaptive',num:10,qs:[],idx:0,score:0,ans:'',checked:false},
@@ -392,15 +394,6 @@ function getQ(id){return allQ().find(q=>q.id===id);}
 function qSRS(id){return S.srsData[id]||{};}
 function setQSRS(id,srs){S.srsData[id]=srs;save();}
 
-function shuffle(arr){
-  const a=[...arr];
-  for(let i=a.length-1;i>0;i--){
-    const j=Math.floor(Math.random()*(i+1));
-    [a[i],a[j]]=[a[j],a[i]];
-  }
-  return a;
-}
-
 function save(){
   localStorage.setItem('dv_m',JSON.stringify([...S.mastered]));
   localStorage.setItem('dv_l',JSON.stringify([...S.learning]));
@@ -412,8 +405,13 @@ function save(){
   localStorage.setItem('dv_srs',JSON.stringify(S.srsData));
   localStorage.setItem('dv_qh',JSON.stringify(S.quizHistory));
   localStorage.setItem('dv_set',JSON.stringify(S.settings));
+  localStorage.setItem('dv_ach',JSON.stringify([...S.achievements]));
+  localStorage.setItem('dv_mp',JSON.stringify(S.masteryPts));
   updateSB();
+  lbUpdateThrottled();
 }
+let _lbThrottleTimer=null;
+function lbUpdateThrottled(){clearTimeout(_lbThrottleTimer);_lbThrottleTimer=setTimeout(lbUpdate,3000);}
 
 // ════════════════════════════════════════════════
 // USERNAME & LEADERBOARD
@@ -424,6 +422,7 @@ function getUsername(){
 }
 function setUsername(u){
   localStorage.setItem('dv_username',u);
+  localStorage.setItem('qv_username',u); // keep in sync with QuoteVault
 }
 
 function lbUpdate(){
@@ -483,21 +482,40 @@ async function lbConfirmUsername(){
   const inp=document.getElementById('lb-uname');
   if(!inp)return;
   const v=inp.value.trim();
-  if(v.length<3||v.length>20||!/^[a-zA-Z0-9_-]+$/.test(v)){
-    toast('⚠ Invalid username');return;
+  if(v.length<3||v.length>20||!/^[a-zA-Z0-9_-]+$/.test(v)){toast('⚠ Invalid username');return;}
+  const oldName=getUsername();
+  const isSameUser=oldName&&oldName.toLowerCase()===v.toLowerCase();
+  // Check if name is taken by a DIFFERENT user
+  if(!isSameUser){
+    try{
+      const r=await fetch(WORKER_URL+'/lb/get?username='+encodeURIComponent(v));
+      const d=await r.json();
+      if(d.found){
+        const errEl=document.getElementById('lb-name-err');
+        if(errEl)errEl.innerHTML=`<span style="color:var(--coral)">⚠ Username already taken — choose another</span>`;
+        return;
+      }
+    }catch(e){/* non-fatal, proceed */}
   }
-  // Check if taken
-  try{
-    const r=await fetch(WORKER_URL+'/lb/get?username='+encodeURIComponent(v));
-    const d=await r.json();
-    if(d.found&&d.user.username.toLowerCase()!==v.toLowerCase()){
-      document.getElementById('lb-name-err').innerHTML=`<span style="color:var(--coral)">Username taken — try another</span>`;
-      return;
-    }
-  }catch(e){/* non-fatal, proceed */}
+  // If changing name: migrate old leaderboard entry to new name
+  if(oldName&&!isSameUser){
+    try{
+      // Get old stats
+      const r=await fetch(WORKER_URL+'/lb/get?username='+encodeURIComponent(oldName));
+      const d=await r.json();
+      if(d.found){
+        // Register new name with old stats
+        await fetch(WORKER_URL+'/lb/rename',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({oldUsername:oldName,newUsername:v})
+        });
+      }
+    }catch(e){/* non-fatal */}
+  }
   setUsername(v);
   closeModal();
-  toast('👤 Username set: '+v);
+  toast('👤 Username '+(oldName&&!isSameUser?'changed to: ':'set: ')+v);
   if(window._lbCb){window._lbCb();window._lbCb=null;}
   lbUpdate();
 }
@@ -562,6 +580,45 @@ function toast(msg,dur=2400){const t=document.getElementById('toast');t.textCont
 function shuf(a){const b=[...a];for(let i=b.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[b[i],b[j]]=[b[j],b[i]];}return b;}
 function pct(n,d){return d?Math.round(n/d*100):0;}
 function addXP(n){S.xp+=n;save();}
+
+// ════════════════════════════════════════════════
+// MASTERY POINTS ENGINE
+// ════════════════════════════════════════════════
+// Each item has a hidden score 0–100. Reaching 100 → mastered. Dropping to 0 → unlearned.
+function getMPts(id){return S.masteryPts[id]||0;}
+function addMPts(id, delta){
+  const cur=getMPts(id);
+  const next=Math.max(0,Math.min(100,cur+delta));
+  S.masteryPts[id]=next;
+  const wasMastered=S.mastered.has(id);
+  const wasLearning=S.learning.has(id);
+  if(next>=100&&!wasMastered){
+    S.mastered.add(id);S.learning.delete(id);
+    addXP(0);// save happens in onMastery/save chain
+    onMastery();
+    toast('⭐ Mastered! +10 XP');addXP(10);
+  } else if(next>=30&&!wasLearning&&!wasMastered){
+    S.learning.add(id);
+  } else if(next<30&&wasLearning&&!wasMastered){
+    S.learning.delete(id);
+  } else if(next<50&&wasMastered){
+    S.mastered.delete(id);S.learning.add(id);
+    toast('📉 Mastery lost — keep practising');
+  }
+  save();
+}
+// Mastery% for display — uses masteryPts if set, else falls back to SRS
+function mastPct(id){
+  if(S.mastered.has(id))return 100;
+  const pts=getMPts(id);
+  if(pts>0)return Math.min(99,pts);
+  // fallback to SRS reps
+  const srs=qSRS(id);
+  return S.learning.has(id)?Math.min(29,Math.round(((srs.reps||0)/4)*25)):Math.min(10,(srs.reps||0)*3);
+}
+function mastColor(pct){
+  return pct>=100?'var(--teal)':pct>=60?'var(--gold)':pct>=30?'var(--amber)':'var(--purple2)';
+}
 function topics(){return['All',...new Set(allQ().map(q=>q.topic))];}
 function periods(topic){const qs=topic==='All'?allQ():allQ().filter(q=>q.topic===topic);return['All',...new Set(qs.map(q=>q.period))];}
 function backBtn(){return S.hist.length?`<button class="bback" onclick="goBack()">← Back</button>`:''}
@@ -699,7 +756,11 @@ function rLib(){
   </div>`:''}
   <input type="text" id="lib-search" placeholder="Search dates, events, significance…" value="${S.search||''}" oninput="libSearchInput(this.value)" style="margin-bottom:9px">
   ${filtered.length===0?'<div style="color:var(--text3);font-size:.8rem">No dates match your filters.</div>':
-  filtered.map(q=>`
+  filtered.map(q=>{
+    const srs=qSRS(q.id);
+    const mp=mastPct(q.id);
+    const mc=mastColor(mp);
+    return`
   <div class="dc" style="${S.hidden.has(q.id)?'opacity:.45;filter:grayscale(.4)':''}">
     <div style="display:flex;justify-content:space-between;align-items:flex-start">
       <div class="dc-date">${q.year}</div>
@@ -707,13 +768,19 @@ function rLib(){
         ${S.hidden.has(q.id)
           ? `<button class="btn bsm" style="color:var(--amber);border-color:var(--amber);opacity:.7" onclick="toggleHidden('${q.id}')" title="Unhide">👁 Hidden</button>`
           : S.mastered.has(q.id)
-            ? `<button class="btn bsm" style="color:var(--teal2);border-color:var(--teal)" onclick="unmasterDV('${q.id}')" title="Mark as not mastered">★ Mastered</button>`
+            ? `<button class="btn bsm" style="color:var(--coral);border-color:var(--coral);font-size:.6rem" onclick="removeMastery('${q.id}')">−Mastery</button>`
             : ''}
-        <button class="btn bsm" onclick="toggleHidden('${q.id}')" style="color:var(--text3);padding:3px 6px">${S.hidden.has(q.id)?'👁':'🚫'}</button>
+        <button class="btn bsm" onclick="toggleHidden('${q.id}')" style="color:${S.hidden.has(q.id)?'var(--amber)':'var(--text3)'};padding:3px 6px">${S.hidden.has(q.id)?'👁':'🚫'}</button>
       </div>
     </div>
     <div class="dc-event">${q.event}</div>
     <div class="dc-sig" style="font-size:.72rem;color:var(--text2)">${q.significance.slice(0,200)}${q.significance.length>200?'…':''}</div>
+    <div style="margin:5px 0 4px;display:flex;align-items:center;gap:6px">
+      <div style="flex:1;height:3px;background:var(--bg4);border-radius:2px;overflow:hidden">
+        <div style="height:100%;width:${mp}%;background:${mc};border-radius:2px;transition:width .4s ease"></div>
+      </div>
+      <div style="font-size:.6rem;color:${mc};min-width:28px;text-align:right;font-weight:600">${mp}%</div>
+    </div>
     <div class="dc-m">
       <span class="tag tp">${q.topic}</span>
       <span class="tag tb">${q.period}</span>
@@ -721,11 +788,11 @@ function rLib(){
       ${q.category?`<span class="tag tt">${q.category}</span>`:''}
       <span style="color:var(--gold)">${'★'.repeat(q.stars||0)}</span>
       ${S.mastered.has(q.id)?'<span class="bm">Mastered</span>':S.learning.has(q.id)?'<span class="bl">Learning</span>':''}
-      ${isDue(qSRS(q.id))?'<span class="bd">Due</span>':''}
+      ${isDue(srs)?'<span class="bd">Due</span>':''}
       ${q._userSubmitted?'<span style="background:rgba(245,166,35,.15);color:var(--amber);font-size:.6rem;padding:1px 7px;border-radius:20px">⏳ Pending review</span>':''}
     </div>
     ${q.note?`<div class="dc-note">⚠ ${q.note}</div>`:''}
-  </div>`).join('')}
+  </div>`}).join('')}
   </div>`;
 }
 
@@ -742,18 +809,16 @@ function libSearchInput(val){
   },180);
 }
 function toggleMastered(id){
-  if(S.mastered.has(id)){S.mastered.delete(id);S.learning.delete(id);}
-  else if(S.learning.has(id)){S.mastered.add(id);S.learning.delete(id);addXP(10);toast('⭐ Mastered! +10 XP');onMastery();}
-  else{S.learning.add(id);}
-  save();render();
-}
-function unmasterDV(id){
-  S.mastered.delete(id);
-  S.learning.delete(id);
-  if(S.srsData) delete S.srsData[id];
-  save();
-  toast('↩ Marked as not mastered');
-  render();
+  if(S.mastered.has(id)){
+    // Un-master: reset points to 40 (still learning)
+    S.mastered.delete(id);S.learning.add(id);S.masteryPts[id]=40;save();render();
+  } else if(S.learning.has(id)){
+    // Force-master: set to 100
+    S.masteryPts[id]=100;S.mastered.add(id);S.learning.delete(id);
+    addXP(10);toast('⭐ Mastered! +10 XP');onMastery();save();render();
+  } else {
+    S.learning.add(id);S.masteryPts[id]=30;save();render();
+  }
 }
 
 // ════════════════════════════════════════════════
@@ -833,19 +898,28 @@ function rSRS(){
     </div>
   </div>
   ${S.srs_show?`<div style="margin-top:14px">
-    <div style="font-size:.72rem;color:var(--text2);margin-bottom:9px;text-align:center">How well did you remember this?<br><span style="font-size:.65rem;color:var(--text3)">Your rating determines when this card reappears.</span></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:7px">
-      <button class="btn br" style="flex-direction:column;padding:8px;height:56px" onclick="rateSRS('${q.id}',1)">
-        <span>😵</span><span style="font-size:.65rem">Blackout<br><span style="color:var(--text3)">retry tomorrow</span></span>
+    <div style="font-size:.72rem;color:var(--text2);margin-bottom:4px;text-align:center">How well did you remember this?</div>
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px">
+      <div style="flex:1;height:4px;background:var(--bg4);border-radius:2px;overflow:hidden">
+        <div style="height:100%;width:${mastPct(q.id)}%;background:${mastColor(mastPct(q.id))};border-radius:2px;transition:width .4s"></div>
+      </div>
+      <div style="font-size:.65rem;color:${mastColor(mastPct(q.id))};font-weight:600;min-width:32px;text-align:right">${mastPct(q.id)}% mastery</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
+      <button class="btn br" style="flex-direction:column;padding:8px;height:58px" onclick="rateSRS('${q.id}',1)">
+        <span>😵</span><span style="font-size:.63rem">Blackout<br><span style="color:var(--text3)">−30% mastery</span></span>
       </button>
-      <button class="btn" style="flex-direction:column;padding:8px;height:56px" onclick="rateSRS('${q.id}',2)">
-        <span>😕</span><span style="font-size:.65rem">Hard<br><span style="color:var(--text3)">retry soon</span></span>
+      <button class="btn" style="flex-direction:column;padding:8px;height:58px;color:var(--coral);border-color:var(--coral)" onclick="rateSRS('${q.id}',2)">
+        <span>😟</span><span style="font-size:.63rem">Hard<br><span style="color:var(--text3)">−10% mastery</span></span>
       </button>
-      <button class="btn" style="flex-direction:column;padding:8px;height:56px" onclick="rateSRS('${q.id}',3)">
-        <span>😊</span><span style="font-size:.65rem">Good<br><span style="color:var(--text3)">~${Math.round((srs.interval||1)*2.5)}d</span></span>
+      <button class="btn" style="flex-direction:column;padding:8px;height:58px;color:var(--amber);border-color:var(--amber)" onclick="rateSRS('${q.id}',3)">
+        <span>🙂</span><span style="font-size:.63rem">Good<br><span style="color:var(--text3)">+15% mastery</span></span>
       </button>
-      <button class="btn bp" style="flex-direction:column;padding:8px;height:56px" onclick="rateSRS('${q.id}',4)">
-        <span>🎯</span><span style="font-size:.65rem">Easy<br><span style="color:var(--purple3)">~${Math.round((srs.interval||1)*3)}d</span></span>
+      <button class="btn" style="flex-direction:column;padding:8px;height:58px;color:var(--teal);border-color:var(--teal)" onclick="rateSRS('${q.id}',4)">
+        <span>😊</span><span style="font-size:.63rem">Easy<br><span style="color:var(--text3)">+22% mastery</span></span>
+      </button>
+      <button class="btn bg" style="flex-direction:column;padding:8px;height:58px;grid-column:span 2" onclick="rateSRS('${q.id}',5)">
+        <span>⚡</span><span style="font-size:.63rem">Perfect — knew instantly<br><span style="color:var(--bg)">+30% mastery</span></span>
       </button>
     </div>
   </div>`:'<div style="text-align:center;margin-top:10px;font-size:.7rem;color:var(--text3)">Tap the card to see the answer</div>'}
@@ -865,11 +939,20 @@ function toggleHidden(id){
   else{S.hidden.add(id);S.mastered.delete(id);S.learning.delete(id);}
   save();render();
 }
+function removeMastery(id){
+  S.mastered.delete(id);S.learning.delete(id);S.masteryPts[id]=0;save();render();toast('🗑 Mastery reset for this date');
+}
 function rateSRS(id,grade){
-  const srs=sm2(qSRS(id),grade);setQSRS(id,srs);
-  if(grade>=3){if(!S.mastered.has(id))S.learning.add(id);}
-  if(grade>=4)addXP(10);else addXP(3);
-  // Pick next due card
+  // grade: 1=Blackout, 2=Hard, 3=Good, 4=Easy, 5=Perfect
+  const srsGrade=grade<=1?0:grade<=2?1:grade<=3?2:grade<=4?3:3; // map to SM2 0-3
+  const srs=sm2(qSRS(id),srsGrade);setQSRS(id,srs);
+  // Mastery points: Blackout=-30, Hard=-10, Good=+15, Easy=+22, Perfect=+30
+  const mDelta=[0,-30,-10,15,22,30][grade]||0;
+  addMPts(id,mDelta);
+  // XP
+  const xpMap=[0,2,3,8,12,15][grade]||0;
+  if(xpMap>0)addXP(xpMap);
+  // Next card
   const srsTopic=S.srs.topic||'All';
   let remaining=allQ().filter(q=>q.id!==id&&isDue(qSRS(q.id)));
   if(srsTopic!=='All')remaining=remaining.filter(q=>q.topic===srsTopic);
@@ -878,17 +961,18 @@ function rateSRS(id,grade){
   save();render();
 }
 
-// ════════════════════════════════════════════════
-// FLASHCARDS — FIXED random button scope
-// ════════════════════════════════════════════════
 function rFC(){
   const topicList=topics();
   const pool=(S.fc.topic==='All'?allQ():allQ().filter(q=>q.topic===S.fc.topic));
   const q=pool[S.fc.idx%pool.length];
   const mode=S.fc.mode||'date';
+  const srs=qSRS(q.id);
+  const mp=mastPct(q.id);
+  const mc=mastColor(mp);
   return`<div>
   ${backBtn()}
   <div class="pt">Flashcards</div>
+  <div class="ps">Front = ${mode==='date'?'date → name the event':'event → name the date'} · tap to flip</div>
   <div class="fbar">
     ${topicList.map(t=>`<button class="fbtn${S.fc.topic===t?' active':''}" onclick="S.fc.topic='${t}';S.fc.idx=0;S.fc.flipped=false;render()">${t}</button>`).join('')}
   </div>
@@ -896,14 +980,15 @@ function rFC(){
     <button class="fbtn${mode==='date'?' active':''}" onclick="S.fc.mode='date';S.fc.flipped=false;render()">Date → Event</button>
     <button class="fbtn${mode==='event'?' active':''}" onclick="S.fc.mode='event';S.fc.flipped=false;render()">Event → Date</button>
   </div>
-  <div style="font-size:.68rem;color:var(--text3);margin-bottom:8px;text-align:center">Card ${(S.fc.idx%pool.length)+1} / ${pool.length}</div>
+  <div style="font-size:.68rem;color:var(--text3);margin-bottom:3px;text-align:center">Card ${(S.fc.idx%pool.length)+1} / ${pool.length}</div>
+  <div class="pb"><div class="pbf pu" style="width:${pct((S.fc.idx%pool.length)+1,pool.length)}%"></div></div>
   <div class="fc-wrap" onclick="S.fc.flipped=!S.fc.flipped;render()">
     <div class="fc${S.fc.flipped?' flip':''}">
       <div class="fc-s fc-front">
         <div class="fc-lbl">${mode==='date'?'Date':'Event'}</div>
         <div class="fc-main">${mode==='date'?q.year:q.event.slice(0,80)}</div>
         <div class="fc-sub">${q.topic} · ${q.period}</div>
-        <div class="fc-hint">Tap to flip</div>
+        <div class="fc-hint">Tap to flip →</div>
       </div>
       <div class="fc-s fc-back">
         <div class="fc-lbl">${mode==='date'?'Event':'Date'}</div>
@@ -912,7 +997,33 @@ function rFC(){
       </div>
     </div>
   </div>
-  <div style="display:flex;gap:8px;justify-content:center;margin-top:12px">
+  ${S.fc.flipped?`
+  <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px">
+    <div style="flex:1;height:4px;background:var(--bg4);border-radius:2px;overflow:hidden">
+      <div style="height:100%;width:${mp}%;background:${mc};border-radius:2px;transition:width .4s"></div>
+    </div>
+    <div style="font-size:.6rem;color:${mc};font-weight:600;min-width:30px;text-align:right">${mp}%</div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:6px">
+    <button class="btn br" style="flex-direction:column;padding:8px;height:58px" onclick="rateFC('${q.id}',0)">
+      <span>😵</span><span style="font-size:.63rem">Blackout<br><span style="color:var(--text3)">−30% mastery</span></span>
+    </button>
+    <button class="btn" style="flex-direction:column;padding:8px;height:58px;color:var(--coral);border-color:var(--coral)" onclick="rateFC('${q.id}',1)">
+      <span>😟</span><span style="font-size:.63rem">Hard<br><span style="color:var(--text3)">−10% mastery</span></span>
+    </button>
+    <button class="btn" style="flex-direction:column;padding:8px;height:58px;color:var(--amber);border-color:var(--amber)" onclick="rateFC('${q.id}',2)">
+      <span>🙂</span><span style="font-size:.63rem">Good<br><span style="color:var(--text3)">+15% mastery</span></span>
+    </button>
+    <button class="btn" style="flex-direction:column;padding:8px;height:58px;color:var(--teal);border-color:var(--teal)" onclick="rateFC('${q.id}',3)">
+      <span>😊</span><span style="font-size:.63rem">Easy<br><span style="color:var(--text3)">+22% mastery</span></span>
+    </button>
+    <button class="btn bg" style="flex-direction:column;padding:8px;height:58px;grid-column:span 2" onclick="rateFC('${q.id}',4)">
+      <span>⚡</span><span style="font-size:.63rem">Perfect — knew instantly<br><span style="color:var(--bg)">+35% mastery</span></span>
+    </button>
+  </div>
+  <div style="font-size:.68rem;color:var(--text3);text-align:center;margin-top:6px">${srs.interval?`SRS: next in ${srs.interval}d · Ease: ${(srs.ef||2.5).toFixed(1)}`:'New card'}</div>`
+  :''}
+  <div style="display:flex;gap:8px;justify-content:center;margin-top:10px">
     <button class="btn" onclick="S.fc.idx=Math.max(0,S.fc.idx-1);S.fc.flipped=false;render()">← Prev</button>
     <button class="btn bp" onclick="S.fc.idx++;S.fc.flipped=false;render()">Next →</button>
     <button class="btn" onclick="fcRandom()">🔀 Random</button>
@@ -920,12 +1031,21 @@ function rFC(){
   </div>`;
 }
 
-// FIX: pool is defined inside the function so random must use the same calculation
 function fcRandom(){
   const pool=(S.fc.topic==='All'?allQ():allQ().filter(q=>q.topic===S.fc.topic));
   S.fc.idx=Math.floor(Math.random()*pool.length);
-  S.fc.flipped=false;
-  render();
+  S.fc.flipped=false;render();
+}
+function rateFC(id,grade){
+  // grade: 0=Blackout,1=Hard,2=Good,3=Easy,4=Mastered
+  const mDeltas=[-30,-10,15,22,35];
+  const mDelta=mDeltas[grade]??0;
+  addMPts(id,mDelta);
+  const srsGrade=grade===0?0:grade===1?1:grade===2?2:3;
+  const srs=sm2(qSRS(id),srsGrade);setQSRS(id,srs);
+  const xpMap=[0,2,8,12,20];addXP(xpMap[grade]||0);
+  S.fc.idx++;S.fc.flipped=false;
+  save();toast(grade>=4?'⭐ Mastered! +20 XP':`+${xpMap[grade]||0} XP`);render();
 }
 
 // ════════════════════════════════════════════════
@@ -1016,7 +1136,7 @@ function rQuizQ(){
     }else if(type==='period'||type==='section'){
       ok=userN.includes(corrN.slice(0,8))||corrN.includes(userN.slice(0,8));
     }else{ok=sim(ans||'',correct)>0.18;}
-    if(ok){S.quiz.score++;addXP(15);}else{addXP(2);}
+    if(ok){S.quiz.score++;addXP(15);addMPts(q.id,20);}else{addXP(2);addMPts(q.id,-10);}
     S.quizHistory.push({date:new Date().toISOString().slice(0,10),correct:ok?1:0,total:1,topic:q.topic});
     save();
     feedback=`<div class="qfb ${ok?'qok':'qwr'}">
@@ -1151,8 +1271,8 @@ function checkTC(){
     ok=nums.some(n=>corrNums.includes(n));
   }else if(tp==='date_to_event'){correct=q.event;ok=sim(ans,q.event)>0.3;}
   else{correct=q.period;ok=normQ(ans).includes(normQ(q.period).slice(0,6));}
-  if(ok){S.tc.score++;addXP(5);S.tc.result={ok:true};}
-  else{S.tc.result={ok:false,correct};}
+  if(ok){S.tc.score++;addXP(5);addMPts(q.id,15);S.tc.result={ok:true};}
+  else{addMPts(q.id,-8);S.tc.result={ok:false,correct};}
   S.tc.idx++;
   if(el){el.value='';el.focus();}
   const res=document.querySelector('.qfb');
@@ -1207,7 +1327,7 @@ function rTimeline(){
   const selTopic=S.tl.topic||topicList[0];
   const periodList=periods(selTopic);
   if(S.tl.mode==='drag')return rTimelineDrag();
-  const allTopicDates=allQ().filter(q=>q.topic===selTopic).sort((a,b)=>a.yearNum-b.yearNum);
+  const allTopicDates=shuf(allQ().filter(q=>q.topic===selTopic));
 
   return`<div>
   ${backBtn()}
@@ -1238,7 +1358,7 @@ function rTimeline(){
   <div class="card" style="margin-top:10px">
     <div class="sec" style="margin-top:0">📅 All Dates for ${selTopic} — tap to highlight</div>
     <div style="display:flex;flex-wrap:wrap;gap:5px;max-height:180px;overflow-y:auto;padding:2px">
-    ${shuffle(allTopicDates).map(q=>`<button onclick="tlHighlightDate('${q.id}')" style="background:${S.mastered.has(q.id)?'rgba(44,182,125,.2)':S.learning.has(q.id)?'rgba(232,197,71,.15)':'var(--bg4)'};border:1px solid ${S.mastered.has(q.id)?'var(--teal)':S.learning.has(q.id)?'var(--gold)':'var(--border2)'};color:${S.mastered.has(q.id)?'var(--teal2)':S.learning.has(q.id)?'var(--gold)':'var(--text2)'};border-radius:5px;padding:3px 8px;font-size:.65rem;cursor:pointer;font-family:'DM Mono',monospace;white-space:nowrap" title="${q.event}">${q.year}</button>`).join('')}
+    ${allTopicDates.map(q=>`<button onclick="tlHighlightDate('${q.id}')" style="background:${S.mastered.has(q.id)?'rgba(44,182,125,.2)':S.learning.has(q.id)?'rgba(232,197,71,.15)':'var(--bg4)'};border:1px solid ${S.mastered.has(q.id)?'var(--teal)':S.learning.has(q.id)?'var(--gold)':'var(--border2)'};color:${S.mastered.has(q.id)?'var(--teal2)':S.learning.has(q.id)?'var(--gold)':'var(--text2)'};border-radius:5px;padding:3px 8px;font-size:.65rem;cursor:pointer;font-family:'DM Mono',monospace;white-space:nowrap" title="${q.event}">${q.year}</button>`).join('')}
     </div>
   </div>
   </div>`;
@@ -1425,7 +1545,7 @@ function rTimelineDrag(){
   const CARDS=pool;
   const placed=S.tl.placed||{};
   const checked=S.tl.checked||false;
-  const bankCards=CARDS.filter(q=>!placed[q.id]);
+  const bankCards=shuf(CARDS.filter(q=>!placed[q.id]));
   const allPlaced=bankCards.length===0;
   const range=Math.max((pool[pool.length-1]?.yearNum||0)-(pool[0]?.yearNum||0),1);
   const tolerance=Math.max(3,range*0.025); // 2.5% of range or at least 3 years
@@ -1466,7 +1586,7 @@ function rTimelineDrag(){
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
     <button class="btn" onclick="S.tl.mode='browse';render()">← Browse View</button>
     <button class="btn" onclick="S.tl.placed={};S.tl.checked=false;render()">🔄 Reset</button>
-    ${allPlaced&&!checked?`<button class="btn bg" onclick="checkDDTimeline()">✅ Check Answers</button>`:''}
+    ${!checked&&Object.keys(placed).length>0?`<button class="btn bg" onclick="checkDDTimeline()">✅ Check Answers${allPlaced?'':' ('+Object.keys(placed).length+' placed)'}</button>`:''}
     ${checked?`<div style="font-size:.8rem;font-weight:600">
       <span style="color:var(--teal2)">🟢 ${correctCount} perfect</span> ·
       <span style="color:var(--amber)">🟡 ${closeCount} close</span> ·
@@ -1480,7 +1600,7 @@ function rTimelineDrag(){
     Scroll/pinch to zoom the timeline · pan by dragging the timeline itself (not a card).<br>
     ${checked
       ?`<span style="color:var(--teal2)">🟢 Correct</span> = within ${Math.round(tolerance)}y · <span style="color:var(--amber)">🟡 Close</span> = within a decade · <span style="color:var(--coral2)">🔴 Wrong</span> = too far off`
-      :`<span style="color:var(--blue)">${Object.keys(placed).length}/${CARDS.length} placed</span>`}
+      :`<span style="color:var(--blue)">${Object.keys(placed).length}/${CARDS.length} placed</span> · You can check answers at any point`}
   </div>
 
   <!-- YEAR INDICATOR -->
@@ -1505,7 +1625,7 @@ function rTimelineDrag(){
 
   <div style="margin-top:8px">
     <div class="sec" style="margin-top:0">📦 Event Bank — drag onto timeline above</div>
-    <div style="font-size:.68rem;color:var(--text3);margin-bottom:6px">${bankCards.length} remaining · placed cards appear as dots on the timeline</div>
+    <div style="font-size:.68rem;color:var(--text3);margin-bottom:6px">${bankCards.length} remaining · placed cards appear as dots on the timeline · check answers any time</div>
     <div class="tl-bank" id="dd-bank"
       ondragover="event.preventDefault()"
       ondrop="ddDropToBank(event)">
@@ -1782,8 +1902,9 @@ function checkDDTimeline(){
   pool.forEach(q=>{
     const yr=placed[q.id];if(yr===undefined)return;
     const diff=Math.abs(yr-q.yearNum);
-    if(diff<=tolerance)correct++;
-    else if(diff<=decadeTol)close++;
+    if(diff<=tolerance){correct++;addMPts(q.id,20);}
+    else if(diff<=decadeTol){close++;addMPts(q.id,5);}
+    else{addMPts(q.id,-8);}
   });
   S.tl.checked=true;_ddState.checked=true;_ddState.placed=placed;
   S.tl.score=correct;addXP(correct*15+close*5);save();render();
@@ -1891,7 +2012,10 @@ function runDump(){
   const pool=w==='All'?allQ():allQ().filter(q=>q.topic===w);
   S.dump.results=lines.map(line=>{
     const{score,quote}=bestMatch(line,pool);
-    return{input:line,s:score>.65?'ok':score>.35?'near':'miss',match:quote};
+    const s=score>.65?'ok':score>.35?'near':'miss';
+    if(quote&&s==='ok')addMPts(quote.id,18);
+    else if(quote&&s==='near')addMPts(quote.id,5);
+    return{input:line,s,match:quote};
   });
   addXP(S.dump.results.filter(r=>r.s==='ok').length*8);
   S.dump.done=true;render();
@@ -2136,6 +2260,7 @@ function rAch(){
     {i:'🌟',n:'Scholar',d:'Mastered 60 dates',e:S.mastered.size>=60},
     {i:'⭐',n:'XP Earner',d:'Reached 100 XP',e:S.xp>=100},
     {i:'💫',n:'XP Champion',d:'Reached 500 XP',e:S.xp>=500},
+    {i:'💥',n:'XP Legend',d:'Reached 1000 XP',e:S.xp>=1000},
     {i:'🔥',n:'On Fire',d:'3-day streak',e:S.streak>=3},
     {i:'🏆',n:'Dedicated',d:'7-day streak',e:S.streak>=7},
     {i:'📅',n:'Timeline Master',d:'Placed 5 cards correctly',e:(S.tl.score||0)>=5},
@@ -2143,11 +2268,13 @@ function rAch(){
     {i:'⏱',n:'Speed Demon',d:'Scored 10+ in Timed Challenge',e:(S.tc.score||0)>=10},
     {i:'🔁',n:'SRS Master',d:'Reviewed 10 SRS cards',e:Object.keys(S.srsData).length>=10},
   ];
+  // Persist newly unlocked achievements
+  achs.forEach(a=>{if(a.e&&!S.achievements.has(a.n)){S.achievements.add(a.n);save();}});
   const earned=achs.filter(a=>a.e).length;
   return`<div>
   ${backBtn()}
   <div class="pt">Achievements</div>
-  <div class="ps">${earned}/${achs.length} unlocked · ${S.xp} XP</div>
+  <div class="ps">${earned}/${achs.length} unlocked · ${S.xp} XP · Level ${Math.floor(S.xp/100)+1}</div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px">
     ${achs.map(a=>`<div class="ach${a.e?'':' locked'}"><div class="ach-i">${a.i}</div><div><div class="ach-n">${a.n}${a.e?' ✓':''}</div><div class="ach-d">${a.d}</div></div></div>`).join('')}
   </div></div>`;
@@ -2190,6 +2317,10 @@ function rSett(){
       <div><div style="font-size:.8rem">Reset Progress</div><div style="font-size:.68rem;color:var(--coral)">Clears XP, mastery, SRS data</div></div>
       <button class="btn bsm" style="color:var(--coral);border-color:var(--coral)" onclick="doReset()">Reset</button>
     </div>
+    <div class="srow">
+      <div><div style="font-size:.8rem">Remove All Mastery</div><div style="font-size:.68rem;color:var(--text3)">Reset mastery points only — keeps XP &amp; SRS</div></div>
+      <button class="btn bsm" style="color:var(--amber);border-color:var(--amber)" onclick="doResetMastery()">Reset Mastery</button>
+    </div>
   </div>
   <div class="sec">Data Management</div>
   <div style="display:flex;gap:7px;flex-wrap:wrap">
@@ -2206,7 +2337,8 @@ function rSett(){
   </div>
   </div>`;
 }
-function doReset(){if(confirm('Reset ALL progress?')){S.mastered=new Set();S.learning=new Set();S.xp=0;S.streak=0;S.srsData={};S.quizHistory=[];save();toast('Reset done');render();}}
+function doReset(){if(confirm('Reset ALL progress?')){S.mastered=new Set();S.learning=new Set();S.hidden=new Set();S.xp=0;S.streak=0;S.srsData={};S.quizHistory=[];S.masteryPts={};save();toast('Reset done');render();}}
+function doResetMastery(){if(confirm('Reset all mastery points? XP and SRS data kept.')){S.mastered=new Set();S.learning=new Set();S.masteryPts={};save();toast('Mastery reset');render();}}
 function exportJSON(){
   const d={canonical:DB,custom:S.custom,mastered:[...S.mastered],learning:[...S.learning],xp:S.xp,streak:S.streak,srsData:S.srsData,quizHistory:S.quizHistory};
   const b=new Blob([JSON.stringify(d,null,2)],{type:'application/json'});
