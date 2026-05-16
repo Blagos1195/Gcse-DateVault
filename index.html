@@ -392,6 +392,15 @@ function getQ(id){return allQ().find(q=>q.id===id);}
 function qSRS(id){return S.srsData[id]||{};}
 function setQSRS(id,srs){S.srsData[id]=srs;save();}
 
+function shuffle(arr){
+  const a=[...arr];
+  for(let i=a.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [a[i],a[j]]=[a[j],a[i]];
+  }
+  return a;
+}
+
 function save(){
   localStorage.setItem('dv_m',JSON.stringify([...S.mastered]));
   localStorage.setItem('dv_l',JSON.stringify([...S.learning]));
@@ -740,6 +749,8 @@ function toggleMastered(id){
 }
 function unmasterDV(id){
   S.mastered.delete(id);
+  S.learning.delete(id);
+  if(S.srsData) delete S.srsData[id];
   save();
   toast('↩ Marked as not mastered');
   render();
@@ -823,7 +834,7 @@ function rSRS(){
   </div>
   ${S.srs_show?`<div style="margin-top:14px">
     <div style="font-size:.72rem;color:var(--text2);margin-bottom:9px;text-align:center">How well did you remember this?<br><span style="font-size:.65rem;color:var(--text3)">Your rating determines when this card reappears.</span></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:7px">
       <button class="btn br" style="flex-direction:column;padding:8px;height:56px" onclick="rateSRS('${q.id}',1)">
         <span>😵</span><span style="font-size:.65rem">Blackout<br><span style="color:var(--text3)">retry tomorrow</span></span>
       </button>
@@ -835,9 +846,6 @@ function rSRS(){
       </button>
       <button class="btn bp" style="flex-direction:column;padding:8px;height:56px" onclick="rateSRS('${q.id}',4)">
         <span>🎯</span><span style="font-size:.65rem">Easy<br><span style="color:var(--purple3)">~${Math.round((srs.interval||1)*3)}d</span></span>
-      </button>
-      <button class="btn bg" style="flex-direction:column;padding:8px;height:56px;grid-column:span 2" onclick="rateSRS('${q.id}',5)">
-        <span>⚡</span><span style="font-size:.65rem">Perfect — knew it instantly<br><span style="color:var(--bg)">~${Math.round((srs.interval||1)*3.5)}d until next review</span></span>
       </button>
     </div>
   </div>`:'<div style="text-align:center;margin-top:10px;font-size:.7rem;color:var(--text3)">Tap the card to see the answer</div>'}
@@ -1230,7 +1238,7 @@ function rTimeline(){
   <div class="card" style="margin-top:10px">
     <div class="sec" style="margin-top:0">📅 All Dates for ${selTopic} — tap to highlight</div>
     <div style="display:flex;flex-wrap:wrap;gap:5px;max-height:180px;overflow-y:auto;padding:2px">
-    ${allTopicDates.map(q=>`<button onclick="tlHighlightDate('${q.id}')" style="background:${S.mastered.has(q.id)?'rgba(44,182,125,.2)':S.learning.has(q.id)?'rgba(232,197,71,.15)':'var(--bg4)'};border:1px solid ${S.mastered.has(q.id)?'var(--teal)':S.learning.has(q.id)?'var(--gold)':'var(--border2)'};color:${S.mastered.has(q.id)?'var(--teal2)':S.learning.has(q.id)?'var(--gold)':'var(--text2)'};border-radius:5px;padding:3px 8px;font-size:.65rem;cursor:pointer;font-family:'DM Mono',monospace;white-space:nowrap" title="${q.event}">${q.year}</button>`).join('')}
+    ${shuffle(allTopicDates).map(q=>`<button onclick="tlHighlightDate('${q.id}')" style="background:${S.mastered.has(q.id)?'rgba(44,182,125,.2)':S.learning.has(q.id)?'rgba(232,197,71,.15)':'var(--bg4)'};border:1px solid ${S.mastered.has(q.id)?'var(--teal)':S.learning.has(q.id)?'var(--gold)':'var(--border2)'};color:${S.mastered.has(q.id)?'var(--teal2)':S.learning.has(q.id)?'var(--gold)':'var(--text2)'};border-radius:5px;padding:3px 8px;font-size:.65rem;cursor:pointer;font-family:'DM Mono',monospace;white-space:nowrap" title="${q.event}">${q.year}</button>`).join('')}
     </div>
   </div>
   </div>`;
