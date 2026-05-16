@@ -2134,17 +2134,17 @@ function rLeaderboard(){
     ?`<div style="text-align:center;padding:30px;color:var(--text3);font-size:.8rem">No users yet — be the first!</div>`
     :`<div class="card" style="margin-bottom:10px">
     <div class="sec" style="margin-top:0">🏛 Dates Mastered</div>
-    ${users.slice().sort((a,b)=>((b.dv_mastered||0)+(b.qv_mastered||0))-((a.dv_mastered||0)+(a.qv_mastered||0))).slice(0,20).map((u,i)=>{
+    ${users.slice().sort((a,b)=>(b.dv_mastered||0)-(a.dv_mastered||0)).slice(0,20).map((u,i)=>{
       const isMe=myName&&u.username.toLowerCase()===myName.toLowerCase();
       return`<div style="${rowStyle(u)}">
         <div style="font-size:.85rem;min-width:26px;text-align:center">${medal(i)}</div>
         <div style="flex:1;min-width:0">
           <div style="font-size:.8rem;font-weight:${isMe?600:400};color:${isMe?'var(--gold)':'var(--text)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${u.username}${isMe?' (you)':''}</div>
-          <div style="font-size:.63rem;color:var(--text3);margin-top:1px">🏛 ${u.dv_mastered||0} dates${u.qv_mastered?` · 📚 ${u.qv_mastered} quotes`:''}</div>
+          <div style="font-size:.63rem;color:var(--text3);margin-top:1px">🏛 dates mastered</div>
         </div>
         <div style="text-align:right;flex-shrink:0">
-          <div style="font-size:.88rem;color:var(--teal2);font-weight:600">${(u.dv_mastered||0)+(u.qv_mastered||0)}</div>
-          <div style="font-size:.6rem;color:var(--text3)">total</div>
+          <div style="font-size:.88rem;color:var(--teal2);font-weight:600">${u.dv_mastered||0}</div>
+          <div style="font-size:.6rem;color:var(--text3)">dates</div>
         </div>
       </div>`;}).join('')}
   </div>
