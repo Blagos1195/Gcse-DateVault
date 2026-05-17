@@ -96,12 +96,12 @@ select option{background:var(--bg3)}
 .dc-m{display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:.65rem;color:var(--text3)}
 .dc-note{margin-top:5px;font-size:.68rem;color:var(--amber);background:rgba(245,166,35,.07);padding:3px 8px;border-radius:5px;border-left:2px solid var(--amber)}
 .fc-wrap{max-width:540px;margin:0 auto}
-.fc{min-height:180px;position:relative;cursor:pointer;border-radius:14px}
-.fc-s{border-radius:14px;flex-direction:column;align-items:center;justify-content:center;padding:20px;text-align:center;min-height:180px;display:flex;width:100%}
-.fc-front{background:var(--bg3);border:1px solid var(--border2);position:relative;z-index:2;visibility:visible;opacity:1;pointer-events:auto}
-.fc-back{background:linear-gradient(135deg,rgba(124,92,191,.2),rgba(44,182,125,.1));border:1px solid var(--purple);position:absolute;top:0;left:0;right:0;min-height:180px;visibility:hidden;opacity:0;pointer-events:none;z-index:1}
-.fc.flip .fc-front{visibility:hidden;opacity:0;pointer-events:none}
-.fc.flip .fc-back{visibility:visible;opacity:1;pointer-events:auto;position:relative;z-index:2}
+.fc{height:180px;position:relative;cursor:pointer;border-radius:14px}
+.fc-s{border-radius:14px;flex-direction:column;align-items:center;justify-content:center;padding:20px;text-align:center;display:flex;width:100%;position:absolute;top:0;left:0;right:0;bottom:0}
+.fc-front{background:var(--bg3);border:1px solid var(--border2);visibility:visible;opacity:1;pointer-events:auto;z-index:2}
+.fc-back{background:linear-gradient(135deg,rgba(124,92,191,.2),rgba(44,182,125,.1));border:1px solid var(--purple);visibility:hidden;opacity:0;pointer-events:none;z-index:1}
+.fc.flip .fc-front{visibility:hidden;opacity:0;pointer-events:none;z-index:1}
+.fc.flip .fc-back{visibility:visible;opacity:1;pointer-events:auto;z-index:2}
 .fc-lbl{font-size:.62rem;color:var(--text3);text-transform:uppercase;letter-spacing:.1em;margin-bottom:7px}
 .fc-main{font-family:'DM Mono',monospace;font-size:1.05rem;line-height:1.65;color:var(--gold)}
 .fc-sub{font-size:.72rem;color:var(--text2);margin-top:7px;line-height:1.5}
@@ -759,36 +759,45 @@ function lbUpdateThrottled(){clearTimeout(_lbThrottleTimer);_lbThrottleTimer=set
 
 // ════════════════════════════════════════════════
 // USERNAME & LEADERBOARD
+// Stable userKey (random UUID) stored in localStorage — never changes.
+// Username is just a display name inside the KV value, freely editable.
 // ════════════════════════════════════════════════
-function getUserId(){
-  // Stable UUID that never changes, even when username changes
-  let uid=localStorage.getItem('dv_uid')||localStorage.getItem('qv_uid');
-  if(!uid){
-    uid='u_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8);
-    localStorage.setItem('dv_uid',uid);
-    localStorage.setItem('qv_uid',uid);
-  }
-  return uid;
-}
 function getUsername(){
-  // Try own key first, then QuoteVault's key for cross-site detection
   return localStorage.getItem('dv_username') || localStorage.getItem('qv_username') || null;
 }
 function setUsername(u){
   localStorage.setItem('dv_username',u);
   localStorage.setItem('qv_username',u); // keep in sync with QuoteVault
 }
+function getUserKey(){
+  // Stable KV key shared across both vaults — never changes even if username changes
+  let k=localStorage.getItem('lb_userKey');
+  if(!k){
+    k=localStorage.getItem('qv_userKey'); // try other vault's copy
+  }
+  return k||null;
+}
+function setUserKey(k){
+  localStorage.setItem('lb_userKey',k);
+  localStorage.setItem('qv_userKey',k); // keep in sync
+}
 
-function lbUpdate(oldUsername){
+async function lbUpdate(){
   const u=getUsername();
   if(!u)return;
-  const payload={username:u,site:'dv',mastered:S.mastered.size,xp:S.xp,userId:getUserId()};
-  if(oldUsername)payload.oldUsername=oldUsername;
-  fetch(WORKER_URL+'/lb/register',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(payload)
-  }).catch(()=>{});
+  const payload={username:u,site:'dv',mastered:S.mastered.size,xp:S.xp};
+  const k=getUserKey();
+  if(k)payload.userKey=k;
+  try{
+    const r=await fetch(WORKER_URL+'/lb/register',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)
+    });
+    const d=await r.json();
+    // Cache the stable userKey returned by the worker
+    if(d.userKey&&d.userKey!==k)setUserKey(d.userKey);
+  }catch(e){/* non-fatal */}
 }
 
 // Called any time mastery is granted — prompts for username if not set, then posts
@@ -817,11 +826,10 @@ function showUsernameModal(onConfirm){
     </div>
     <div id="lb-name-err" style="font-size:.72rem;margin-bottom:8px"></div>
     <div style="display:flex;gap:8px">
-      <button class="btn bg" onclick="lbConfirmUsername(${JSON.stringify(onConfirm ? 'cb' : '')})">✓ Set Username</button>
+      <button class="btn bg" onclick="lbConfirmUsername()">✓ Set Username</button>
       <button class="btn" onclick="closeModal()">Skip for now</button>
     </div>
   </div>`);
-  // store callback so lbConfirmUsername can call it
   window._lbCb=onConfirm||null;
   setTimeout(()=>{const el=document.getElementById('lb-uname');if(el){el.focus();el.select();}},80);
 }
@@ -841,41 +849,28 @@ async function lbConfirmUsername(){
   if(v.length<3||v.length>20||!/^[a-zA-Z0-9_-]+$/.test(v)){toast('⚠ Invalid username');return;}
   const oldName=getUsername();
   const isSameUser=oldName&&oldName.toLowerCase()===v.toLowerCase();
-  // Check if name is taken by a DIFFERENT user
+  const myKey=getUserKey();
+  // Check if the new username is taken by a DIFFERENT user
+  // (skip check if it's just a case change of our own name)
   if(!isSameUser){
     try{
       const r=await fetch(WORKER_URL+'/lb/get?username='+encodeURIComponent(v));
       const d=await r.json();
-      if(d.found){
+      if(d.found&&d.user&&d.user.userKey&&d.user.userKey!==myKey){
+        // Taken by someone else
         const errEl=document.getElementById('lb-name-err');
         if(errEl)errEl.innerHTML=`<span style="color:var(--coral)">⚠ Username already taken — choose another</span>`;
         return;
       }
     }catch(e){/* non-fatal, proceed */}
   }
-  // If changing name: migrate old leaderboard entry to new name
-  if(oldName&&!isSameUser){
-    try{
-      // Get old stats
-      const r=await fetch(WORKER_URL+'/lb/get?username='+encodeURIComponent(oldName));
-      const d=await r.json();
-      if(d.found){
-        // Register new name with old stats
-        await fetch(WORKER_URL+'/lb/rename',{
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({oldUsername:oldName,newUsername:v})
-        });
-      }
-    }catch(e){/* non-fatal */}
-  }
+  // Update local storage first for instant UI feedback
   setUsername(v);
   closeModal();
   toast('👤 Username '+(oldName&&!isSameUser?'changed to: ':'set: ')+v);
   if(window._lbCb){window._lbCb();window._lbCb=null;}
-  // After a rename the worker already migrated the entry — just update stats, not re-register
-  // Pass oldName so the worker can remove the old entry atomically
-  lbUpdate(oldName&&!isSameUser?oldName:null);
+  // Push to worker — sends our stable userKey so it updates the same KV entry, not create a new one
+  lbUpdate();
 }
 
 // ════════════════════════════════════════════════
