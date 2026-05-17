@@ -2987,8 +2987,16 @@ function _dvReadFields(pfx){
 // ════════════════════════════════════════════════
 // INIT
 // ════════════════════════════════════════════════
-buildNav();updateSB();render();
+initTheme();buildNav();updateSB();render();
 loadCloudFacts();
+
+// Sync theme instantly when changed in another tab/vault
+window.addEventListener('storage',e=>{
+  if(e.key==='vt_theme'&&e.newValue){
+    applyTheme(e.newValue);
+    if(S&&S.settings){S.settings.theme=e.newValue;save();}
+  }
+});
 </script>
 </body>
 </html>
