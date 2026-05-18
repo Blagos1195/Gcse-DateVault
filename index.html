@@ -27,9 +27,8 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);hei
 #sidebar::-webkit-scrollbar{width:3px}
 #sidebar::-webkit-scrollbar-thumb{background:var(--border2)}
 .sb-logo{padding:12px 12px 10px;border-bottom:1px solid var(--border)}
-.sb-logo-main{font-family:'Playfair Display',serif;font-size:1.5rem;color:var(--gold);font-weight:600;display:flex;align-items:center;gap:6px}
-.sb-logo-sub{font-size:.8rem;color:var(--text2);letter-spacing:.1em;text-transform:uppercase;margin-top:2px}
-.sb-logo-sub-sub{font-size:.6rem;color:var(--text3);letter-spacing:.1em;text-transform:uppercase;margin-top:2px}
+.sb-logo-main{font-family:'Playfair Display',serif;font-size:1.05rem;color:var(--gold);font-weight:600;display:flex;align-items:center;gap:6px}
+.sb-logo-sub{font-size:.6rem;color:var(--text3);letter-spacing:.1em;text-transform:uppercase;margin-top:2px}
 .sb-sec{font-size:.58rem;color:var(--text3);letter-spacing:.12em;text-transform:uppercase;padding:10px 12px 3px}
 .ni{display:flex;align-items:center;gap:7px;padding:6px 8px;cursor:pointer;border-radius:6px;margin:1px 5px;font-size:.78rem;color:var(--text2);transition:all .1s;user-select:none;white-space:nowrap}
 .ni:hover{background:var(--bg3);color:var(--text)}
@@ -188,9 +187,8 @@ select option{background:var(--bg3)}
 <div id="app">
 <div id="sidebar">
   <div class="sb-logo">
-    <div class="sb-logo-main">⏳DateVault</div>
-    <div class="sb-logo-sub">GCSE History</div>
-    <div class="sb-logo-sub-sub">To login on a new device,</p>go to settings</div>
+    <div class="sb-logo-main">🏛 DateVault</div>
+    <div class="sb-logo-sub">GCSE History · Edexcel</div>
   </div>
   <nav id="nav"></nav>
   <a class="sb-link" href="https://blagos1195.github.io/Gcse-QuoteVault/" target="_blank">📚 Switch to QuoteVault</a>
@@ -319,6 +317,12 @@ function applyTheme(key){
   // Save to shared cross-app key so both Vault apps stay in sync
   localStorage.setItem('vt_theme',key);
   if(S&&S.settings){S.settings.theme=key;save();}
+  // Push theme to worker for cross-device sync (fire and forget)
+  const uk=getUserKey();
+  if(uk){
+    fetch(WORKER_URL+'/lb/update-theme',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({userKey:uk,theme:key})}).catch(()=>{});
+  }
 }
 
 function initTheme(){
@@ -787,7 +791,14 @@ function setUserKey(k){
 async function lbUpdate(){
   const u=getUsername();
   if(!u)return;
-  const payload={username:u,site:'dv',mastered:S.mastered.size,xp:S.xp,mastered_ids:[...S.mastered].map(String)};
+  const myPending=S.pending.filter(p=>p._submittedByMe);
+  const payload={
+    username:u,site:'dv',mastered:S.mastered.size,xp:S.xp,
+    mastered_ids:[...S.mastered].map(String),
+    pending_ids:myPending.map(p=>String(p.id)),
+    pending_data:myPending,
+    theme:(S.settings&&S.settings.theme)||'default'
+  };
   const k=getUserKey();
   if(k)payload.userKey=k;
   try{
@@ -813,11 +824,23 @@ async function syncFromWorker(){
     const d=await r.json();
     if(!d.found||!d.user)return;
     const u=d.user;
-    // Sync username if set remotely and not locally
-    if(u.username&&!getUsername()){
-      setUsername(u.username);
+    // Sync username
+    if(u.username&&!getUsername()){setUsername(u.username);}
+    // Sync XP — take the higher of local vs remote (XP never decreases)
+    const remoteXP=u.dv_xp||0;
+    if(remoteXP>S.xp){
+      S.xp=remoteXP;
+      toast(`☁️ XP synced from cloud (${remoteXP} XP)`,2500);
     }
-    // Merge mastered IDs from worker into local state
+    // Sync theme
+    if(u.theme){
+      const localTheme=(S.settings&&S.settings.theme)||'default';
+      if(u.theme&&u.theme!==localTheme){
+        applyTheme(u.theme);
+        if(S.settings)S.settings.theme=u.theme;
+      }
+    }
+    // Merge mastered IDs
     const remoteMastered=Array.isArray(u.dv_mastered_ids)?u.dv_mastered_ids:[];
     if(remoteMastered.length>S.mastered.size){
       let added=0;
@@ -825,18 +848,70 @@ async function syncFromWorker(){
         const numId=+id;
         const key=Number.isFinite(numId)&&String(numId)===String(id)?numId:id;
         if(!S.mastered.has(key)&&!S.mastered.has(String(key))){
-          S.mastered.add(key);
-          S.masteryPts[key]=100;
-          added++;
+          S.mastered.add(key);S.masteryPts[key]=100;added++;
         }
       });
-      if(added>0){
-        save();
-        toast(`☁️ Synced ${added} mastered date${added===1?'':'s'} from cloud`,3000);
-        render();
+      if(added>0){save();toast(`☁️ Synced ${added} mastered date${added===1?'':'s'} from cloud`,3000);}
+    }
+    // Sync pending submissions from other devices
+    const remotePending=Array.isArray(u.dv_pending_data)?u.dv_pending_data:[];
+    if(remotePending.length>0){
+      const localPendingIds=new Set(S.pending.map(p=>String(p.id)));
+      let syncedPending=0;
+      remotePending.forEach(item=>{
+        if(!localPendingIds.has(String(item.id))){
+          S.pending.push({...item,_submittedByMe:true,_status:'pending'});
+          syncedPending++;
+        }
+      });
+      if(syncedPending>0){save();toast(`☁️ Synced ${syncedPending} pending submission${syncedPending===1?'':'s'}`,3000);}
+    }
+    // Check for rejections
+    const rejectedIds=Array.isArray(u.dv_rejected_ids)?u.dv_rejected_ids:[];
+    if(rejectedIds.length>0){
+      const myRejected=S.pending.filter(p=>p._submittedByMe&&rejectedIds.includes(String(p.id)));
+      if(myRejected.length>0){
+        promptRejectedFacts(myRejected,rejectedIds);
+        return;
       }
     }
+    save();render();
   }catch(e){/* non-fatal */}
+}
+
+function promptRejectedFacts(rejected,allRejectedIds){
+  const names=rejected.map(q=>`"${(q.event||q.year||'fact').slice(0,40)}"`).join(', ');
+  const msg=rejected.length===1
+    ?`Your submitted fact ${names} was reviewed and not approved. Would you like to remove it from your library?`
+    :`${rejected.length} of your submitted facts were not approved: ${names}. Would you like to remove them from your library?`;
+  openModal(`<div>
+    <div style="font-family:'Playfair Display',serif;font-size:1rem;color:var(--coral);margin-bottom:8px">📋 Submission Update</div>
+    <div style="font-size:.78rem;color:var(--text2);margin-bottom:14px;line-height:1.6">${msg}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn br" onclick="dismissRejectedFacts(true)">🗑 Remove from my library</button>
+      <button class="btn" onclick="dismissRejectedFacts(false)">Keep for now</button>
+    </div>
+  </div>`);
+  window._pendingRejectedIds=allRejectedIds;
+  window._pendingRejected=rejected;
+}
+
+function dismissRejectedFacts(remove){
+  const rejectedIds=window._pendingRejectedIds||[];
+  if(remove){
+    const rejSet=new Set(rejectedIds.map(String));
+    S.pending=S.pending.filter(p=>!rejSet.has(String(p.id)));
+    save();
+    const k=getUserKey();
+    if(k){
+      fetch(WORKER_URL+'/lb/register',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({userKey:k,username:getUsername(),site:'dv',mastered:S.mastered.size,xp:S.xp,
+          mastered_ids:[...S.mastered].map(String),pending_ids:[],pending_data:[]})
+      }).catch(()=>{});
+    }
+  }
+  window._pendingRejectedIds=null;window._pendingRejected=null;
+  closeModal();save();render();
 }
 
 // ── User Key modal ──
@@ -1200,23 +1275,26 @@ function rLib(){
   ${S.tf!=='All'?`<div class="fbar">
     ${[...new Set(qs.filter(q=>S.tf==='All'||q.topic===S.tf).map(q=>q.section).filter(Boolean))].map(s=>`<button class="fbtn${S.sf===s?' active':''}" onclick="S.sf='${s}';render()">${s}</button>`).join('')}
   </div>`:''}
-  <input type="text" id="lib-search" placeholder="Search dates, events, significance…" value="${S.search||''}" oninput="libSearchInput(this.value)" style="margin-bottom:9px">
+  <input type="text" id="lib-search" placeholder="Search dates, events, significance…" value="${S.search||''}" oninput="libSearchInput(this)" style="margin-bottom:9px;direction:ltr;unicode-bidi:bidi-override">
   ${filtered.length===0?'<div style="color:var(--text3);font-size:.8rem">No dates match your filters.</div>':
   filtered.map(q=>{
     const srs=qSRS(q.id);
     const mp=mastPct(q.id);
     const mc=mastColor(mp);
     return`
-  <div class="dc" style="${S.hidden.has(q.id)?'opacity:.45;filter:grayscale(.4)':''}">
+  <div class="dc" style="${S.hidden.has(q.id)?'opacity:.45;filter:grayscale(.4)':''}${q._status==='pending'?';border-left:3px solid var(--amber)':''}">
     <div style="display:flex;justify-content:space-between;align-items:flex-start">
       <div class="dc-date">${q.year}</div>
-      <div style="display:flex;gap:5px;flex-wrap:wrap">
+      <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">
+        ${q._submittedByMe&&q._status==='pending'?`<span style="font-size:.6rem;background:rgba(245,166,35,.2);color:var(--amber);border:1px solid var(--amber);border-radius:4px;padding:1px 5px">⏳ Pending</span>`:''}
         ${S.hidden.has(q.id)
           ? `<button class="btn bsm" style="color:var(--amber);border-color:var(--amber);opacity:.7" onclick="toggleHidden('${q.id}')" title="Unhide">👁 Hidden</button>`
           : S.mastered.has(q.id)
             ? `<button class="btn bsm" style="color:var(--coral);border-color:var(--coral);font-size:.6rem" onclick="removeMastery('${q.id}')">−Mastery</button>`
             : ''}
-        <button class="btn bsm" onclick="toggleHidden('${q.id}')" style="color:${S.hidden.has(q.id)?'var(--amber)':'var(--text3)'};padding:3px 6px">${S.hidden.has(q.id)?'👁':'🚫'}</button>
+        ${q._submittedByMe&&q._status==='pending'
+          ?`<button class="btn bsm" onclick="deletePendingFact('${q.id}')" style="color:var(--coral);border-color:var(--coral);padding:3px 6px" title="Withdraw">✕</button>`
+          :`<button class="btn bsm" onclick="toggleHidden('${q.id}')" style="color:${S.hidden.has(q.id)?'var(--amber)':'var(--text3)'};padding:3px 6px">${S.hidden.has(q.id)?'👁':'🚫'}</button>`}
       </div>
     </div>
     <div class="dc-event">${q.event}</div>
@@ -1235,7 +1313,6 @@ function rLib(){
       <span style="color:var(--gold)">${'★'.repeat(q.stars||0)}</span>
       ${S.mastered.has(q.id)?'<span class="bm">Mastered</span>':S.learning.has(q.id)?'<span class="bl">Learning</span>':''}
       ${isDue(srs)?'<span class="bd">Due</span>':''}
-      ${q._userSubmitted?'<span style="background:rgba(245,166,35,.15);color:var(--amber);font-size:.6rem;padding:1px 7px;border-radius:20px">⏳ Pending review</span>':''}
     </div>
     ${q.note?`<div class="dc-note">⚠ ${q.note}</div>`:''}
   </div>`}).join('')}
@@ -1243,16 +1320,18 @@ function rLib(){
 }
 
 let _libSearchTimer=null;
-function libSearchInput(val){
-  clearTimeout(_libSearchTimer);
+function libSearchInput(el){
+  const val=el.value;
+  const pos=el.selectionStart;
   S.search=val;
+  clearTimeout(_libSearchTimer);
   _libSearchTimer=setTimeout(()=>{
     render();
     requestAnimationFrame(()=>{
       const inp=document.getElementById('lib-search');
-      if(inp){inp.focus();const len=inp.value.length;inp.setSelectionRange(len,len);}
+      if(inp){inp.focus();try{inp.setSelectionRange(pos,pos);}catch(e){}}
     });
-  },180);
+  },120);
 }
 function toggleMastered(id){
   if(S.mastered.has(id)){
@@ -2472,10 +2551,11 @@ function runDump(){
 // ════════════════════════════════════════════════
 function rAdd(){
   const topicOpts=["Crime & Punishment","Weimar & Nazi Germany","Henry VIII & His Ministers","American West","Other"];
+  const myPending=S.pending.filter(p=>p._submittedByMe&&p._status==='pending');
   return`<div>
   ${backBtn()}
   <div class="pt">Add a Date/Fact</div>
-  <div class="ps">Suggest a fact · goes to admin queue for approval</div>
+  <div class="ps">Suggest a fact · goes to admin queue for approval · visible to you immediately while pending</div>
   <div style="max-width:520px">
     <div class="fg"><label>Year / Date *</label><input type="text" id="a-yr" placeholder="e.g. 1929 or November 1938"></div>
     <div class="fg"><label>Event *</label><input type="text" id="a-ev" placeholder="Brief name of the event" oninput="liveDupCheck()"></div>
@@ -2496,7 +2576,25 @@ function rAdd(){
       <button class="btn" onclick="checkDupFact()">Check duplicate</button>
     </div>
     <div id="add-fb" style="margin-top:10px"></div>
-  </div></div>`;
+  </div>
+  ${myPending.length>0?`
+  <div class="div"></div>
+  <div class="sec">📬 My Pending Submissions</div>
+  <div style="font-size:.72rem;color:var(--text3);margin-bottom:8px">These facts are visible to you while awaiting admin approval. You can withdraw any that are still pending.</div>
+  ${myPending.map(q=>`
+  <div class="dc" style="border-left:3px solid var(--amber);max-width:540px;margin-bottom:7px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+      <div>
+        <div class="dc-date">${q.year||'?'}</div>
+        <div class="dc-event">${q.event}</div>
+        <div style="font-size:.7rem;color:var(--text2);margin-top:3px">${(q.significance||'').slice(0,100)}${(q.significance||'').length>100?'…':''}</div>
+      </div>
+      <span style="font-size:.6rem;background:rgba(245,166,35,.2);color:var(--amber);border:1px solid var(--amber);border-radius:4px;padding:2px 6px;white-space:nowrap;flex-shrink:0">⏳ Pending</span>
+    </div>
+    ${q.submittedAt?`<div style="font-size:.62rem;color:var(--text3);margin-top:5px">Submitted: ${new Date(q.submittedAt).toLocaleString('en-GB')}</div>`:''}
+    <button class="btn bsm br" style="margin-top:8px" onclick="deletePendingFact('${q.id}')">✕ Withdraw</button>
+  </div>`).join('')}`:''}
+  </div>`;
 }
 function liveDupCheck(){
   const ev=(document.getElementById('a-ev')?.value||'').trim();
@@ -2521,23 +2619,40 @@ async function saveFact(){
   const ev=(document.getElementById('a-ev')?.value||'').trim();
   const sig=(document.getElementById('a-sig')?.value||'').trim();
   if(!yr||!ev||!sig){toast('Fill in year, event, and significance');return;}
-  const id=Date.now().toString()+'-dv'+Math.random().toString(36).slice(2,6);
-  const q={id,year:yr,event:ev,significance:sig,
+  const tempId=Date.now().toString()+'-dv'+Math.random().toString(36).slice(2,6);
+  const q={id:tempId,year:yr,event:ev,significance:sig,
     topic:document.getElementById('a-to').value,period:document.getElementById('a-pe').value,
     section:document.getElementById('a-sec').value,category:document.getElementById('a-cat').value,
     stars:+document.getElementById('a-st').value,note:document.getElementById('a-no').value,
-    yearNum:parseInt(yr.match(/\d+/)?.[0])||0,submittedAt:new Date().toISOString()};
+    yearNum:parseInt(yr.match(/\d+/)?.[0])||0,submittedAt:new Date().toISOString(),
+    _submittedByMe:true,_status:'pending'};
   const fbEl=document.getElementById('add-fb');
   fbEl.innerHTML=`<div class="qfb" style="background:rgba(74,158,255,.08);border:1px solid rgba(74,158,255,.25);color:var(--blue)">⏳ Submitting…</div>`;
   try{
     const resp=await fetch(WORKER_URL+'/dv/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(q)});
     if(!resp.ok)throw new Error('HTTP '+resp.status);
-    S.pending=S.pending.filter(p=>p.id!==q.id);S.pending.push({...q,_userSubmitted:true});save();
-    toast('📬 Fact submitted for review');
-    fbEl.innerHTML=`<div class="qfb" style="background:rgba(124,92,191,.1);border:1px solid rgba(124,92,191,.3);color:var(--purple3)">📬 Submitted! Available while awaiting review.</div>`;
+    const result=await resp.json();
+    if(result.id)q.id=result.id;
+    S.pending=S.pending.filter(p=>p.id!==q.id);
+    S.pending.push(q);
+    save();
+    lbUpdate();
+    toast('📬 Fact submitted! Showing in your library while awaiting review.');
+    fbEl.innerHTML=`<div class="qfb" style="background:rgba(124,92,191,.1);border:1px solid rgba(124,92,191,.3);color:var(--purple3)">📬 Submitted! Visible in your library now — an admin must approve it to appear for everyone.</div>`;
     ['a-yr','a-ev','a-sig','a-pe','a-sec','a-no'].forEach(id=>{const e=document.getElementById(id);if(e)e.value='';});
     document.getElementById('live-dup').innerHTML='';
+    buildNav();render();
   }catch(e){fbEl.innerHTML=`<div class="qfb qwr">❌ Submission failed — ${e.message}</div>`;}
+}
+
+async function deletePendingFact(id){
+  if(!confirm('Remove this pending fact from your library?\nIf it hasn\'t been reviewed yet, the submission will also be withdrawn.'))return;
+  try{
+    await fetch(WORKER_URL+'/dv/reject',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token:'',id,pw:''})});
+  }catch(e){/* non-fatal */}
+  S.pending=S.pending.filter(p=>String(p.id)!==String(id));
+  save();lbUpdate();buildNav();toast('🗑 Submission removed');render();
 }
 
 // ════════════════════════════════════════════════
@@ -2980,8 +3095,11 @@ async function adminApprove(idx){
     const resp=await fetch(WORKER_URL+'/dv/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:_adminToken,id:q.id})});
     if(!resp.ok)throw new Error('HTTP '+resp.status);
   }catch(e){toast('⚠ Worker error: '+e.message,3500);return;}
-  delete q.submittedAt;delete q._userSubmitted;
-  S.pending=S.pending.filter(p=>p.id!==q.id);S.custom.push(q);addXP(5);save();
+  delete q.submittedAt;delete q._submittedByMe;delete q._status;delete q._userSubmitted;
+  // Move from pending → custom (dedup)
+  S.pending=S.pending.filter(p=>p.id!==q.id);
+  if(!S.custom.find(c=>String(c.id)===String(q.id)))S.custom.push(q);
+  addXP(5);save();
   _adminPending.splice(idx,1);buildNav();toast('✅ Fact approved! +5 XP');render();
 }
 async function adminReject(idx){
@@ -2990,9 +3108,8 @@ async function adminReject(idx){
     const resp=await fetch(WORKER_URL+'/dv/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:_adminToken,id:q.id})});
     if(!resp.ok)throw new Error('HTTP '+resp.status);
   }catch(e){toast('⚠ Worker error: '+e.message,3500);return;}
-  const rejId=_adminPending[idx]?.id;_adminPending.splice(idx,1);
-  if(rejId){S.pending=S.pending.filter(p=>p.id!==rejId);save();}
-  toast('❌ Fact rejected');render();
+  _adminPending.splice(idx,1);
+  toast('❌ Fact rejected — submitter will be notified on next load');render();
 }
 async function adminDeleteApproved(idx){
   const q=S.custom[idx];if(!q)return;
@@ -3009,9 +3126,22 @@ async function loadCloudFacts(){
     const resp=await fetch(WORKER_URL+'/dv/quotes');if(!resp.ok)return;
     const data=await resp.json();
     if(Array.isArray(data.items)){
-      const existingIds=new Set([...DB,...S.custom,...S.pending].map(q=>q.id));
-      const newFacts=data.items.filter(f=>f.yearNum!==undefined&&!existingIds.has(f.id));
-      if(newFacts.length>0){S.custom=[...S.custom,...newFacts];save();render();}
+      const existingIds=new Set([...DB,...S.custom,...S.pending].map(q=>String(q.id)));
+      const newFacts=data.items.filter(f=>f.yearNum!==undefined&&!existingIds.has(String(f.id)));
+      // Move newly approved pending items to custom
+      const approvedFromPending=[];
+      S.pending=S.pending.filter(p=>{
+        const cloudVersion=data.items.find(ci=>String(ci.id)===String(p.id));
+        if(cloudVersion){approvedFromPending.push({...cloudVersion});return false;}
+        return true;
+      });
+      if(approvedFromPending.length>0){
+        const customIds=new Set(S.custom.map(q=>String(q.id)));
+        approvedFromPending.forEach(q=>{if(!customIds.has(String(q.id)))S.custom.push(q);});
+        toast(`✅ ${approvedFromPending.length} of your submitted fact${approvedFromPending.length===1?'':'s'} got approved!`,4000);
+      }
+      if(newFacts.length>0){S.custom=[...S.custom,...newFacts];}
+      if(newFacts.length>0||approvedFromPending.length>0){save();render();}
     }
   }catch(e){console.log(e);}
 }
@@ -3041,8 +3171,10 @@ async function adminSavePendingEdit(idx){
     await fetch(WORKER_URL+'/dv/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:_adminToken,id:q.id})});
   }catch(e){toast('⚠ Worker approve error: '+e.message,3500);}
   _adminPending.splice(idx,1);
-  delete q.submittedAt;delete q._userSubmitted;
-  S.pending=S.pending.filter(p=>p.id!==q.id);S.custom.push(q);addXP(5);save();buildNav();closeModal();
+  delete q.submittedAt;delete q._submittedByMe;delete q._status;delete q._userSubmitted;
+  S.pending=S.pending.filter(p=>p.id!==q.id);
+  if(!S.custom.find(c=>String(c.id)===String(q.id)))S.custom.push(q);
+  addXP(5);save();buildNav();closeModal();
   toast('✅ Edited, approved & added! +5 XP');render();
 }
 function adminEditApproved(idx){
