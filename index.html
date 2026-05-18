@@ -869,7 +869,8 @@ async function syncFromWorker(){
     // Check for rejections
     const rejectedIds=Array.isArray(u.dv_rejected_ids)?u.dv_rejected_ids:[];
     if(rejectedIds.length>0){
-      const myRejected=S.pending.filter(p=>p._submittedByMe&&rejectedIds.includes(String(p.id)));
+      const acknowledgedIds=new Set(JSON.parse(localStorage.getItem('dv_rej_ack')||'[]').map(String));
+      const myRejected=S.pending.filter(p=>p._submittedByMe&&rejectedIds.includes(String(p.id))&&!acknowledgedIds.has(String(p.id)));
       if(myRejected.length>0){
         promptRejectedFacts(myRejected,rejectedIds);
         return;
@@ -904,11 +905,24 @@ function dismissRejectedFacts(remove){
     save();
     const k=getUserKey();
     if(k){
+      // Clear pending AND rejected IDs on server so they don't reappear
       fetch(WORKER_URL+'/lb/register',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({userKey:k,username:getUsername(),site:'dv',mastered:S.mastered.size,xp:S.xp,
           mastered_ids:[...S.mastered].map(String),pending_ids:[],pending_data:[]})
       }).catch(()=>{});
     }
+    // Clear the local acknowledgement store too
+    const existing=JSON.parse(localStorage.getItem('dv_rej_ack')||'[]');
+    const cleaned=existing.filter(id=>!rejectedIds.map(String).includes(String(id)));
+    localStorage.setItem('dv_rej_ack',JSON.stringify(cleaned));
+  }else{
+    // "Keep for now" — remember these IDs so we don't prompt again next load
+    const existing=JSON.parse(localStorage.getItem('dv_rej_ack')||'[]');
+    const merged=[...new Set([...existing.map(String),...rejectedIds.map(String)])];
+    localStorage.setItem('dv_rej_ack',JSON.stringify(merged));
+    // Mark the pending entries locally so they show as rejected in the UI
+    S.pending=S.pending.map(p=>rejectedIds.map(String).includes(String(p.id))?{...p,_rejected:true}:p);
+    save();
   }
   window._pendingRejectedIds=null;window._pendingRejected=null;
   closeModal();save();render();
