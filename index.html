@@ -703,7 +703,9 @@ const S = {
   mastered:new Set(JSON.parse(localStorage.getItem('dv_m')||'[]')),
   learning:new Set(JSON.parse(localStorage.getItem('dv_l')||'[]')),
   xp:+localStorage.getItem('dv_xp')||0,
-  streak:+localStorage.getItem('dv_str')||1,
+  streak:+localStorage.getItem('dv_str')||0,
+  maxStreak:+localStorage.getItem('dv_maxstr')||0,
+  lastXpDate:localStorage.getItem('dv_lastxpdate')||'',
   custom:JSON.parse(localStorage.getItem('dv_c')||'[]'),
   hidden:new Set(JSON.parse(localStorage.getItem('dv_h')||'[]')),
   pending:JSON.parse(localStorage.getItem('dv_p')||'[]'),
@@ -749,6 +751,8 @@ function save(){
   localStorage.setItem('dv_l',JSON.stringify([...S.learning]));
   localStorage.setItem('dv_xp',S.xp);
   localStorage.setItem('dv_str',S.streak);
+  localStorage.setItem('dv_maxstr',S.maxStreak);
+  localStorage.setItem('dv_lastxpdate',S.lastXpDate);
   localStorage.setItem('dv_c',JSON.stringify(S.custom));
   localStorage.setItem('dv_h',JSON.stringify([...S.hidden]));
   localStorage.setItem('dv_p',JSON.stringify(S.pending));
@@ -797,7 +801,8 @@ async function lbUpdate(){
     mastered_ids:[...S.mastered].map(String),
     pending_ids:myPending.map(p=>String(p.id)),
     pending_data:myPending,
-    theme:(S.settings&&S.settings.theme)||'default'
+    theme:(S.settings&&S.settings.theme)||'default',
+    streak:S.streak,max_streak:S.maxStreak
   };
   const k=getUserKey();
   if(k)payload.userKey=k;
@@ -832,6 +837,10 @@ async function syncFromWorker(){
       S.xp=remoteXP;
       toast(`☁️ XP synced from cloud (${remoteXP} XP)`,2500);
     }
+    // Sync streak
+    const remoteStreak=u.streak||0;const remoteMaxStreak=u.max_streak||0;
+    if(remoteStreak>S.streak){S.streak=remoteStreak;}
+    if(remoteMaxStreak>S.maxStreak){S.maxStreak=remoteMaxStreak;}
     // Sync theme
     if(u.theme){
       const localTheme=(S.settings&&S.settings.theme)||'default';
@@ -1114,7 +1123,32 @@ let _tt;
 function toast(msg,dur=2400){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');clearTimeout(_tt);_tt=setTimeout(()=>t.classList.remove('show'),dur);}
 function shuf(a){const b=[...a];for(let i=b.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[b[i],b[j]]=[b[j],b[i]];}return b;}
 function pct(n,d){return d?Math.round(n/d*100):0;}
-function addXP(n){S.xp+=n;save();}
+function addXP(n){
+  S.xp+=n;
+  if(n>0){
+    const today=new Date().toISOString().slice(0,10);
+    if(S.lastXpDate!==today){
+      const yesterday=new Date(Date.now()-86400000).toISOString().slice(0,10);
+      if(S.lastXpDate===yesterday){
+        S.streak++;
+      } else if(S.lastXpDate===''){
+        S.streak=1; // first ever XP
+      } else {
+        S.streak=1; // missed a day — reset
+      }
+      S.lastXpDate=today;
+      if(S.streak>S.maxStreak)S.maxStreak=S.streak;
+      streakSyncToServer();
+    }
+  }
+  save();
+}
+function streakSyncToServer(){
+  const u=getUsername();const k=getUserKey();
+  if(!u||!k)return;
+  fetch(WORKER_URL+'/lb/streak',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({userKey:k,streak:S.streak,max_streak:S.maxStreak})}).catch(()=>{});
+}
 
 // ════════════════════════════════════════════════
 // MASTERY POINTS ENGINE
@@ -1158,14 +1192,36 @@ function topics(){return['All',...new Set(allQ().map(q=>q.topic))];}
 function periods(topic){const qs=topic==='All'?allQ():allQ().filter(q=>q.topic===topic);return['All',...new Set(qs.map(q=>q.period))];}
 function backBtn(){return S.hist.length?`<button class="bback" onclick="goBack()">← Back</button>`:''}
 function normQ(s){return s.toLowerCase().replace(/[^a-z0-9 ',.-]/g,'').replace(/\s+/g,' ').trim();}
+function lev(a,b){
+  if(!a.length)return b.length;if(!b.length)return a.length;
+  const m=[];for(let i=0;i<=a.length;i++)m[i]=[i];
+  for(let j=0;j<=b.length;j++)m[0][j]=j;
+  for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++)
+    m[i][j]=a[i-1]===b[j-1]?m[i-1][j-1]:1+Math.min(m[i-1][j],m[i][j-1],m[i-1][j-1]);
+  return m[a.length][b.length];
+}
+function wordSim(wa,wb){
+  // Each word in wa: exact match or close (levenshtein ≤2) to any word in wb
+  let matched=0;
+  wa.forEach(w=>{
+    if(wb.has(w)){matched++;return;}
+    for(const bw of wb){if(w.length>3&&bw.length>3&&lev(w,bw)<=2){matched++;return;}}
+  });
+  return wa.length&&wb.size?(2*matched)/(wa.length+wb.size):0;
+}
 function sim(a,b){
   const na=normQ(a),nb=normQ(b);
   if(na===nb)return 1;
+  // direct levenshtein for short strings
+  if(na.length<=30&&nb.length<=30){
+    const d=lev(na,nb);const mx=Math.max(na.length,nb.length);
+    const levScore=1-d/mx;
+    if(levScore>0.8)return levScore;
+  }
   const wa=na.split(' ').filter(w=>w.length>2);
   const wb=new Set(nb.split(' ').filter(w=>w.length>2));
   if(!wa.length||!wb.size)return 0;
-  let c=0;wa.forEach(w=>{if(wb.has(w))c++;});
-  return(2*c)/(wa.length+wb.size);
+  return wordSim(wa,wb);
 }
 function bestMatch(inp,pool){
   let best=0,q=null;
@@ -1667,20 +1723,30 @@ function rQuizQ(){
   let feedback='';
   if(checked){
     const userN=normQ(ans||'');const corrN=normQ(correct);
-    let ok=false;
+    let ok=false,close=false;
     if(type==='event_to_date'){
       const nums=ans.match(/\d{3,4}/g)||[];
       const corrNums=correct.match(/\d{3,4}/g)||[];
       ok=nums.some(n=>corrNums.includes(n));
+      if(!ok&&nums.length){close=nums.some(n=>corrNums.some(cn=>Math.abs(+n-+cn)<=5));}
     }else if(type==='period'||type==='section'){
-      ok=userN.includes(corrN.slice(0,8))||corrN.includes(userN.slice(0,8));
-    }else{ok=sim(ans||'',correct)>0.18;}
-    if(ok){S.quiz.score++;addXP(15);addMPts(q.id,20);}else{addXP(2);addMPts(q.id,-10);}
+      ok=userN.includes(corrN.slice(0,8))||corrN.includes(userN.slice(0,8))||sim(userN,corrN)>0.7;
+      if(!ok)close=sim(userN,corrN)>0.45;
+    }else{
+      const s=sim(ans||'',correct);
+      ok=s>0.55;
+      if(!ok)close=s>0.30;
+    }
+    if(ok){S.quiz.score++;addXP(15);addMPts(q.id,20);}
+    else if(close){addXP(5);addMPts(q.id,5);} // partial credit
+    else{addXP(2);addMPts(q.id,-10);}
     S.quizHistory.push({date:new Date().toISOString().slice(0,10),correct:ok?1:0,total:1,topic:q.topic});
     save();
-    feedback=`<div class="qfb ${ok?'qok':'qwr'}">
-      ${ok?'✅ Correct! +15 XP':'❌ Not quite — +2 XP for trying'}
-      <div style="margin-top:6px;font-size:.78rem"><strong style="color:var(--gold)">Model answer:</strong><br>${correct}</div>
+    const fbClass=ok?'qok':close?'qfb':'qwr';
+    const fbStyle=close?'background:rgba(245,166,35,.12);border:1px solid rgba(245,166,35,.3);':'';
+    feedback=`<div class="qfb ${fbClass}" style="${fbStyle}">
+      ${ok?'✅ Correct! +15 XP':close?'🟡 Close — nearly right! +5 XP':'❌ Not quite — +2 XP for trying'}
+      <div style="margin-top:6px;font-size:.78rem"><strong style="color:var(--gold)">Answer:</strong><br>${correct}</div>
       ${type!=='significance'?`<div style="margin-top:5px;font-size:.73rem;color:var(--text2)">${q.significance.slice(0,180)}…</div>`:''}
     </div>
     <button class="btn bp" style="margin-top:9px" onclick="nextQQ()">Next →</button>`;
@@ -1774,7 +1840,7 @@ function rTimed(){
     <button class="btn" onclick="skipTC()">Skip →</button>
     <button class="btn bsm" style="margin-left:auto;color:var(--coral)" onclick="endTC()">End</button>
   </div>
-  ${S.tc.result?`<div class="qfb ${S.tc.result.ok?'qok':'qwr'}" style="margin-top:8px">${S.tc.result.ok?'✅ Correct!':'❌ Answer: '+S.tc.result.correct}</div>`:''}
+  ${S.tc.result?`<div class="qfb ${S.tc.result.ok?'qok':S.tc.result.close?'qfb':'qwr'}" style="${S.tc.result.close?'background:rgba(245,166,35,.12);border:1px solid rgba(245,166,35,.3);margin-top:8px':' margin-top:8px'}">${S.tc.result.ok?'✅ Correct!':S.tc.result.close?'🟡 Close!':'❌ Answer: '+S.tc.result.correct}</div>`:''}
   </div>`;
 }
 function startTC(){
@@ -1804,13 +1870,15 @@ function checkTC(){
   const ans=(el?el.value:'').trim();
   const q=S.tc.qs[S.tc.idx%S.tc.qs.length];
   const tp=S.tc.type||'event_to_date';
-  let correct='',ok=false;
+  let correct='',ok=false,close=false;
   if(tp==='event_to_date'){
     correct=q.year;const nums=ans.match(/\d{3,4}/g)||[];const corrNums=q.year.match(/\d{3,4}/g)||[];
     ok=nums.some(n=>corrNums.includes(n));
-  }else if(tp==='date_to_event'){correct=q.event;ok=sim(ans,q.event)>0.3;}
-  else{correct=q.period;ok=normQ(ans).includes(normQ(q.period).slice(0,6));}
+    if(!ok&&nums.length)close=nums.some(n=>corrNums.some(cn=>Math.abs(+n-+cn)<=5));
+  }else if(tp==='date_to_event'){correct=q.event;const s=sim(ans,q.event);ok=s>0.55;if(!ok)close=s>0.30;}
+  else{correct=q.period;ok=normQ(ans).includes(normQ(q.period).slice(0,6))||sim(ans,q.period)>0.7;if(!ok)close=sim(ans,q.period)>0.4;}
   if(ok){S.tc.score++;addXP(5);addMPts(q.id,15);S.tc.result={ok:true};}
+  else if(close){addXP(2);addMPts(q.id,5);S.tc.result={ok:false,close:true,correct};}
   else{addMPts(q.id,-8);S.tc.result={ok:false,correct};}
   S.tc.idx++;
   if(el){el.value='';el.focus();}
@@ -2683,6 +2751,7 @@ function rLeaderboard(){
     const isMe=myName&&u.username.toLowerCase()===myName.toLowerCase();
     return`border-bottom:1px solid var(--border);padding:8px 4px;display:flex;align-items:center;gap:8px;${isMe?'background:rgba(232,197,71,.07);border-left:2px solid var(--gold);padding-left:8px;':''}`;
   };
+  if(!S._lbTab)S._lbTab='mastered';
   return`<div>
   ${backBtn()}
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;flex-wrap:wrap;gap:8px">
@@ -2695,6 +2764,7 @@ function rLeaderboard(){
         <div style="flex:1;min-width:120px">
           <div style="font-size:.65rem;color:var(--text3);text-transform:uppercase;letter-spacing:.08em">Your username</div>
           <div style="font-size:.95rem;color:var(--gold);font-weight:600">👤 ${myName}</div>
+          <div style="font-size:.7rem;color:var(--amber);margin-top:2px">🔥 ${S.streak} day streak · 🏅 ${S.maxStreak} best</div>
         </div>
         ${myRank>0?`<div style="text-align:center"><div style="font-size:1.3rem">${medal(myRank-1)}</div><div style="font-size:.62rem;color:var(--text3)">rank</div></div>`:''}
         <button class="btn bsm" onclick="showUsernameModal()" style="color:var(--text2)">Change name</button>
@@ -2703,11 +2773,17 @@ function rLeaderboard(){
         <div style="font-size:.85rem;margin-bottom:8px">Set a username to appear on the leaderboard</div>
         <button class="btn bp" onclick="showUsernameModal()">👤 Set Username</button>
       </div>`}
+  <div class="fbar" style="margin-bottom:10px">
+    <button class="fbtn${S._lbTab==='mastered'?' active':''}" onclick="S._lbTab='mastered';render()">🏛 Dates</button>
+    <button class="fbtn${S._lbTab==='xp'?' active':''}" onclick="S._lbTab='xp';render()">⚡ XP</button>
+    <button class="fbtn${S._lbTab==='streak'?' active':''}" onclick="S._lbTab='streak';render()">🔥 Streak</button>
+  </div>
   ${_lbLoading&&!_lbCache
     ?`<div style="text-align:center;padding:30px;color:var(--text3);font-size:.8rem">⏳ Loading leaderboard…</div>`
     :users.length===0
     ?`<div style="text-align:center;padding:30px;color:var(--text3);font-size:.8rem">No users yet — be the first!</div>`
-    :`<div class="card" style="margin-bottom:10px">
+    :S._lbTab==='mastered'
+    ?`<div class="card" style="margin-bottom:10px">
     <div class="sec" style="margin-top:0">🏛 Dates Mastered</div>
     ${users.slice().sort((a,b)=>(b.dv_mastered||0)-(a.dv_mastered||0)).slice(0,20).map((u,i)=>{
       const isMe=myName&&u.username.toLowerCase()===myName.toLowerCase();
@@ -2722,8 +2798,9 @@ function rLeaderboard(){
           <div style="font-size:.6rem;color:var(--text3)">dates</div>
         </div>
       </div>`;}).join('')}
-  </div>
-  <div class="card">
+  </div>`
+    :S._lbTab==='xp'
+    ?`<div class="card">
     <div class="sec" style="margin-top:0">⚡ Combined XP</div>
     ${users.slice(0,20).map((u,i)=>{
       const isMe=myName&&u.username.toLowerCase()===myName.toLowerCase();
@@ -2740,6 +2817,24 @@ function rLeaderboard(){
         <div style="text-align:right;flex-shrink:0;margin-left:8px">
           <div style="font-size:.88rem;color:var(--purple3);font-weight:600">${totalXP}</div>
           <div style="font-size:.6rem;color:var(--text3)">XP</div>
+        </div>
+      </div>`;}).join('')}
+  </div>`
+    :`<div class="card">
+    <div class="sec" style="margin-top:0">🔥 Longest Streak</div>
+    <div style="font-size:.68rem;color:var(--text3);margin-bottom:8px">Best ever consecutive day streak (breaks if a day is missed)</div>
+    ${users.slice().sort((a,b)=>(b.max_streak||0)-(a.max_streak||0)).slice(0,20).map((u,i)=>{
+      const isMe=myName&&u.username.toLowerCase()===myName.toLowerCase();
+      const ms=u.max_streak||0;const cs=u.streak||0;
+      return`<div style="${rowStyle(u)}">
+        <div style="font-size:.85rem;min-width:26px;text-align:center">${medal(i)}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:.8rem;font-weight:${isMe?600:400};color:${isMe?'var(--gold)':'var(--text)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${u.username}${isMe?' (you)':''}</div>
+          <div style="font-size:.63rem;color:var(--text3);margin-top:1px">🔥 ${cs} current · 🏅 ${ms} best</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:.88rem;color:var(--amber);font-weight:600">${ms}</div>
+          <div style="font-size:.6rem;color:var(--text3)">best</div>
         </div>
       </div>`;}).join('')}
   </div>`}
