@@ -837,9 +837,15 @@ async function syncFromWorker(){
       S.xp=remoteXP;
       toast(`☁️ XP synced from cloud (${remoteXP} XP)`,2500);
     }
-    // Sync streak
+    // Sync streak — also restore lastXpDate so addXP doesn't reset a synced streak
     const remoteStreak=u.streak||0;const remoteMaxStreak=u.max_streak||0;
-    if(remoteStreak>S.streak){S.streak=remoteStreak;}
+    if(remoteStreak>S.streak){
+      S.streak=remoteStreak;
+      if(!S.lastXpDate){
+        S.lastXpDate=new Date().toISOString().slice(0,10);
+        localStorage.setItem('dv_lastxpdate',S.lastXpDate);
+      }
+    }
     if(remoteMaxStreak>S.maxStreak){S.maxStreak=remoteMaxStreak;}
     // Sync theme
     if(u.theme){
@@ -2193,7 +2199,7 @@ function rTimelineDrag(){
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
     <button class="btn" onclick="S.tl.mode='browse';render()">← Browse View</button>
     <button class="btn" onclick="S.tl.placed={};S.tl.checked=false;render()">🔄 Reset</button>
-    ${!checked&&Object.keys(placed).length>0?`<button class="btn bg" onclick="checkDDTimeline()">✅ Check Answers${allPlaced?'':' ('+Object.keys(placed).length+' placed)'}</button>`:''}
+    ${Object.keys(placed).length>0?`<button class="btn bg" onclick="checkDDTimeline()">${checked?'🔄 Re-check Answers':'✅ Check Answers'}${!allPlaced&&!checked?' ('+Object.keys(placed).length+'/'+CARDS.length+' placed)':''}</button>`:''}
     ${checked?`<div style="font-size:.8rem;font-weight:600">
       <span style="color:var(--teal2)">🟢 ${correctCount} perfect</span> ·
       <span style="color:var(--amber)">🟡 ${closeCount} close</span> ·
@@ -2207,7 +2213,7 @@ function rTimelineDrag(){
     Scroll/pinch to zoom the timeline · pan by dragging the timeline itself (not a card).<br>
     ${checked
       ?`<span style="color:var(--teal2)">🟢 Correct</span> = within ${Math.round(tolerance)}y · <span style="color:var(--amber)">🟡 Close</span> = within a decade · <span style="color:var(--coral2)">🔴 Wrong</span> = too far off`
-      :`<span style="color:var(--blue)">${Object.keys(placed).length}/${CARDS.length} placed</span> · You can check answers at any point`}
+      :`<span style="color:var(--blue)">${Object.keys(placed).length}/${CARDS.length} placed</span> · ${Object.keys(placed).length>0?'You can check answers now or keep placing':'Drag cards onto the timeline to begin'}`}
   </div>
 
   <!-- YEAR INDICATOR -->
@@ -2479,9 +2485,11 @@ function ddDropOnTimeline(e){
     // Inject check button
     const topBar=document.querySelector('[onclick="S.tl.mode=\'browse\';render()"]')?.parentElement;
     if(topBar){
-      const existing=topBar.querySelector('[onclick="checkDDTimeline()"]');
+      const existing=topBar.querySelector('.btn.bg[onclick]');
       if(!existing){
         const btn=document.createElement('button');btn.className='btn bg';btn.textContent='✅ Check Answers';btn.onclick=checkDDTimeline;topBar.appendChild(btn);
+      } else {
+        existing.textContent=S.tl.checked?'🔄 Re-check Answers':'✅ Check Answers';
       }
     }
   }
@@ -3336,6 +3344,72 @@ initTheme();buildNav();updateSB();render();
 loadCloudFacts();
 // Sync progress from worker if user has a key (multi-device support)
 if(getUserKey())syncFromWorker();
+
+
+// ── Global keyboard shortcuts ─────────────────────────────────────────────
+document.addEventListener('keydown', function(e) {
+  const tag = document.activeElement && document.activeElement.tagName;
+  const inInput = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT');
+  const page = S.page;
+
+  // Escape / Backspace = go back (not in inputs)
+  if (e.key === 'Escape' && page !== 'dashboard') {
+    if (page === 'timed' && S.tc && S.tc.active) {
+      e.preventDefault(); if(S.tc.timer)clearInterval(S.tc.timer); S.tc.active=false; render(); return;
+    }
+    if (!inInput) { e.preventDefault(); goBack(); return; }
+  }
+  if (e.key === 'Backspace' && !inInput && page !== 'dashboard') {
+    e.preventDefault(); goBack(); return;
+  }
+
+  if (page === 'srs') {
+    if (!S.srs_show) {
+      if (e.key === ' ') { e.preventDefault(); S.srs_show=true; render(); }
+    } else {
+      const q = S.srs_q;
+      if (!q) return;
+      if (e.key === '1') rateSRS(q.id, 1);
+      else if (e.key === '2') rateSRS(q.id, 2);
+      else if (e.key === '3') rateSRS(q.id, 3);
+      else if (e.key === '4') rateSRS(q.id, 4);
+      else if (e.key === '5') rateSRS(q.id, 5);
+    }
+  }
+
+  if (page === 'flashcards') {
+    if (!S.fc.flipped) {
+      if (e.key === ' ') { e.preventDefault(); S.fc.flipped=true; render(); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); S.fc.idx++; S.fc.flipped=false; render(); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); S.fc.idx=Math.max(0,S.fc.idx-1); S.fc.flipped=false; render(); }
+    } else {
+      const pool=(S.fc.topic==='All'?allQ():allQ().filter(q=>q.topic===S.fc.topic));
+      const q=pool[S.fc.idx%pool.length];
+      if (e.key === ' ') { e.preventDefault(); S.fc.flipped=false; render(); }
+      else if (q && e.key === '1') rateFC(q.id, 0);
+      else if (q && e.key === '2') rateFC(q.id, 1);
+      else if (q && e.key === '3') rateFC(q.id, 2);
+      else if (q && e.key === '4') rateFC(q.id, 3);
+      else if (q && e.key === '5') rateFC(q.id, 4);
+      else if (e.key === 'ArrowRight') { e.preventDefault(); S.fc.idx++; S.fc.flipped=false; render(); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); S.fc.idx=Math.max(0,S.fc.idx-1); S.fc.flipped=false; render(); }
+    }
+  }
+
+  if (page === 'quiz') {
+    if (e.key === 'Enter' && !inInput) {
+      e.preventDefault();
+      if (S.quiz.active && !S.quiz.checked) submitQ();
+      else if (S.quiz.checked) { S.quiz.idx++; S.quiz.checked=false; S.quiz.ans=''; render(); }
+    }
+  }
+
+  if (page === 'timed') {
+    if (e.key === 'Escape' && S.tc && S.tc.active) {
+      e.preventDefault(); if(S.tc.timer)clearInterval(S.tc.timer); S.tc.active=false; render();
+    }
+  }
+});
 
 // Sync theme instantly when changed in another tab/vault
 window.addEventListener('storage',e=>{
